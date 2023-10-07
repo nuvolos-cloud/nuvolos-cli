@@ -4,4 +4,6 @@ __pycache__
 .eggs
 dist
 nuvolos-cli.egg-info
+nuvolos_cli.egg-info
 .vscode
+.nuvolos
