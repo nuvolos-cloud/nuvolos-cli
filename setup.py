@@ -25,19 +25,21 @@ setup(
     author="Alphacruncher",
     author_email="support@nuvolos.cloud",
     license="MIT",
-    packages=["nuvolos-cli", "nuvolos-cli.storage"],
+    packages=["nuvolos_cli"],
     install_requires=[
-        "Nuvolos-Client-API" "click",
+        "Nuvolos-Client-API",
+        "click",
         "click-log",
         "pyyaml",
         "semver",
-        "python-tabulate",
+        "tabulate",
     ],
     zip_safe=False,
-    entry_points="""
-        [console_scripts]
-        nuvolos=nuvolos-cli.interface:nuvolos
-    """,
+    entry_points={
+        "console_scripts": [
+            "nuvolos=nuvolos_cli.interface:nuvolos",
+        ],
+    },
     cmdclass={"install": PostInstallCommand},
     include_package_data=True,
     setup_requires=["pytest-runner"],

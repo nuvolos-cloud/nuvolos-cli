@@ -5,7 +5,7 @@ from .config import get_api_config
 
 import nuvolos_client_api
 from nuvolos_client_api.models.org_client_api import OrgClientAPI
-from nuvolos_client_api.models.org_space_limitied import OrgSpaceLimited
+from nuvolos_client_api.models.org_space_limitied import OrgSpaceLimitied
 from nuvolos_client_api.rest import ApiException
 from .logging import clog
 from .exception import NuvolosException
@@ -28,7 +28,10 @@ class NuvolosContext:
         with nuvolos_client_api.ApiClient(config) as api_client:
             api_instance = nuvolos_client_api.OrganizationsApi(api_client)
             try:
-                _current_org = api_instance.orgs_v1_org_slug_get(slug)
+                self._current_org = api_instance.orgs_v1_org_slug_get(slug)
+                self._current_space = None
+                self._current_instance = None
+                self._current_snapshot = None
             except ApiException as e:
                 raise NuvolosException(
                     f"Exception when setting current organization by slug [{slug}]: {e}"
@@ -45,7 +48,7 @@ class NuvolosContext:
     def get_current_org(self):
         return self._current_org
 
-    def set_current_space(self, space: OrgSpaceLimited):
+    def set_current_space(self, space: OrgSpaceLimitied):
         if not self._current_org:
             raise NuvolosException(
                 "Current Nuvolos organization not set, please choose an organization first."
@@ -57,4 +60,6 @@ class NuvolosContext:
                 f"Space [{space.slug}] does not belong to current organization [{self._current_org.slug}]."
             )
         self._current_space = space
+        self._current_instance = None
+        self._current_snapshot = None
         clog.debug(f"Current space set to [{space.slug}]")

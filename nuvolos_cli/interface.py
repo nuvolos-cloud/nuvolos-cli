@@ -44,7 +44,8 @@ def nv_cli_config(ctx, **kwargs):
 
 @nuvolos.command("list")
 @click.option(
-    "-o" "--org",
+    "-o",
+    "--org",
     type=str,
     help="The organization to use to list spaces",
 )
@@ -87,9 +88,10 @@ def nv_list(ctx, **kwargs):
 
 @nuvolos.command("apps")
 @click.option(
-    "-o" "--org",
+    "-o",
+    "--org",
     type=str,
-    help="The organization to use to list spaces",
+    help="The organization to use to list applications",
 )
 @click.option(
     "-s",
@@ -101,7 +103,7 @@ def nv_list(ctx, **kwargs):
     "-i",
     "--instance",
     type=str,
-    help="The Nuvolos API key to use for authentication",
+    help="The instance to use to list applications",
 )
 @click.pass_context
 def nv_apps(ctx, **kwargs):
@@ -127,7 +129,7 @@ def nv_apps(ctx, **kwargs):
         print_models(list_all_running_apps())
 
 
-@nuvolos.command("config")
+@nuvolos.command("info")
 def nv_info():
     """
     Prints information about the Nuvolos CLI

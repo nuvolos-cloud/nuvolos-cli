@@ -87,9 +87,10 @@ def get_config():
 
 
 def get_api_config():
-    config = get_config()
+    dc = get_config()
+    config = dc.read()
     return nuvolos_client_api.Configuration(
-        host="https://az-api.nuvolos.cloud",
+        host="https://nc-1590.s.nuvolos.nv-backend.nginx.nuvolos.cloud/",
         api_key={"ApiKeyAuth": config["api_key"]},
         api_key_prefix={"ApiKeyAuth": "basic"},
     )
@@ -117,10 +118,12 @@ def init_cli_config(
 def check_api_key_configured():
     api_key = os.environ.get("NUVOLOS_API_KEY")
     if api_key is None:
-        global_config = get_global_dict_config()
+        gdc = get_global_dict_config()
+        global_config = gdc.read()
         api_key = global_config.get("api_key")
         if api_key is None:
-            local_config = get_local_dict_config()
+            ldc = get_local_dict_config()
+            local_config = ldc.read()
             api_key = local_config.get("api_key")
             if api_key is None:
                 raise NuvolosException(
