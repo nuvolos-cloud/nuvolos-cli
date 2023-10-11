@@ -43,7 +43,7 @@ class DictConfig(object):
 
 def from_variable(variable_name, default=None):
     val = os.environ.get(variable_name, default=default)
-    if not host:
+    if not val:
         if pathlib.Path(f"/secrets/{variable_name}").exists():
             with pathlib.Path(f"/secrets/{variable_name}").open(mode="r") as f:
                 val = f.read()
