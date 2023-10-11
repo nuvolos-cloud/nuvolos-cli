@@ -41,16 +41,21 @@ class DictConfig(object):
             return yaml.dump(d, f)
 
 
+def from_variable(variable_name, default=None):
+    val = os.environ.get(variable_name, default=default)
+    if not val:
+        if pathlib.Path(f"/secrets/{variable_name}").exists():
+            with pathlib.Path(f"/secrets/{variable_name}").open(mode="r") as f:
+                val = f.read()
+    return val
+
+
 def default_global_configs():
-    api_key = os.environ.get("NUVOLOS_API_KEY")
-    if not api_key:
-        if pathlib.Path("/secrets/NUVOLOS_API_KEY").exists():
-            with pathlib.Path("/secrets/NUVOLOS_API_KEY").open(mode="r") as f:
-                api_key = f.read()
     return {
         "app_name": "nuvolos-cli",
         "nuvolos_cli_version": __version__,
-        "api_key": api_key,
+        "api_key": from_variable("NUVOLOS_API_KEY"),
+        "host": from_variable("NUVOLOS_API_HOST", "https://az-api.nuvolos.cloud")
     }
 
 
@@ -76,21 +81,14 @@ def get_config_path():
 
 
 def get_config():
-    if get_local_config_path().exists():
-        return get_local_dict_config()
-    elif get_default_config_path().exists():
-        return get_global_dict_config()
-    else:
-        raise NuvolosException(
-            "Nuvolos CLI is not configured, please set your API key with `nuvolos config --api-key`."
-        )
+    return get_local_dict_config()
 
 
 def get_api_config():
     dc = get_config()
     config = dc.read()
     return nuvolos_client_api.Configuration(
-        host="https://nc-1590.s.nuvolos.nv-backend.nginx.nuvolos.cloud/",
+        host=config["host"],
         api_key={"ApiKeyAuth": config["api_key"]},
         api_key_prefix={"ApiKeyAuth": "basic"},
     )
