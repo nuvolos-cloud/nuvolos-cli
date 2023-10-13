@@ -11,7 +11,7 @@ from .api_client import (
     list_apps,
     list_all_running_apps,
 )
-from .utils import print_model, print_models
+from .utils import format_response, print_models_tabulated
 from .cli import NuvolosCli
 
 
@@ -61,7 +61,14 @@ def nv_cli_config(ctx, **kwargs):
     type=str,
     help="The instance to use to list snapshots",
 )
+@click.option(
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format",
+)
 @click.pass_context
+@format_response
 def nv_list(ctx, **kwargs):
     """
     Lists the Nuvolos organizations / spaces / instances / apps available to the current user
@@ -70,20 +77,19 @@ def nv_list(ctx, **kwargs):
     if kwargs.get("org"):
         if kwargs.get("space"):
             if kwargs.get("instance"):
-                print_model(
-                    list_snapshots(
-                        kwargs.get("org"),
-                        kwargs.get("space"),
-                        kwargs.get("instance"),
-                        kwargs.get("snapshot"),
-                    )
+                res = list_snapshots(
+                    kwargs.get("org"),
+                    kwargs.get("space"),
+                    kwargs.get("instance"),
+                    kwargs.get("snapshot"),
                 )
             else:
-                print_models(list_instances(kwargs.get("org"), kwargs.get("space")))
+                res = list_instances(kwargs.get("org"), kwargs.get("space"))
         else:
-            print_models(list_spaces(kwargs.get("org")))
+            res = list_spaces(kwargs.get("org"))
     else:
-        print_models(list_orgs())
+        res = list_orgs()
+    return res
 
 
 @nuvolos.command("apps")
@@ -105,7 +111,14 @@ def nv_list(ctx, **kwargs):
     type=str,
     help="The instance to use to list applications",
 )
+@click.option(
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format",
+)
 @click.pass_context
+@format_response
 def nv_apps(ctx, **kwargs):
     """
     Lists the Nuvolos applications available to the current user
@@ -114,19 +127,20 @@ def nv_apps(ctx, **kwargs):
     if kwargs.get("org"):
         if kwargs.get("space"):
             if kwargs.get("instance"):
-                print_models(
-                    list_apps(
-                        kwargs.get("org"),
-                        kwargs.get("space"),
-                        kwargs.get("instance"),
-                    )
+                res = list_apps(
+                    kwargs.get("org"),
+                    kwargs.get("space"),
+                    kwargs.get("instance"),
                 )
+
             else:
-                print_models(list_apps(kwargs.get("org"), kwargs.get("space")))
+                res = list_apps(kwargs.get("org"), kwargs.get("space"))
         else:
-            print_models(list_apps(kwargs.get("org")))
+            res = list_apps(kwargs.get("org"))
     else:
-        print_models(list_all_running_apps())
+        res = list_all_running_apps()
+
+    return res
 
 
 @nuvolos.command("info")

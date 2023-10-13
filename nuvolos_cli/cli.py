@@ -2,7 +2,7 @@ import cmd
 from .context import NuvolosContext
 from .config import init_cli_config, info
 from .api_client import list_orgs
-from .utils import print_model, print_models
+from .utils import print_model_tabulated, print_models_tabulated
 
 
 class NuvolosCli(cmd.Cmd):
@@ -30,7 +30,7 @@ Welcome to the Nuvolos CLI. Type help or ? to list commands.
     def do_orgs(self, arg):
         "List the Nuvolos organizations"
         orgs = list_orgs()
-        print_models(orgs)
+        print_models_tabulated(orgs)
 
     def do_orgs_use(self, slug):
         "Set the current org in the NuvolosContext to the Org with slug of `slug`"
