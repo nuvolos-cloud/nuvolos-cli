@@ -2,12 +2,10 @@ import os
 import yaml
 import pathlib
 
+from click import ClickException
+
 from .version import __version__
 from .logging import clog
-
-from .exception import (
-    NuvolosException,
-)
 from .version import __version__
 
 import nuvolos_client_api
@@ -37,33 +35,42 @@ class DictConfig(object):
             return yaml.dump(d, f)
 
 
+def from_variable(variable_name, default=None):
+    val = os.environ.get(variable_name, default=default)
+    if not val:
+        if pathlib.Path(f"/secrets/{variable_name}").exists():
+            with pathlib.Path(f"/secrets/{variable_name}").open(mode="r") as f:
+                val = f.read()
+    return val
+
+
 def default_global_configs():
     return {
         "app_name": "nuvolos-cli",
         "nuvolos_cli_version": __version__,
-        "api_key": None,
+        "api_key": from_variable("NUVOLOS_API_KEY"),
+        "host": from_variable("NUVOLOS_API_HOST", "https://az-api.nuvolos.cloud")
     }
 
 
 def get_global_dict_config():
-    return DictConfig(get_default_config_path(), default_global_configs)
+    return DictConfig(get_default_config_path(), default_global_configs())
 
 
 def get_config():
-    api_key = os.environ.get("NUVOLOS_API_KEY")
-    if not api_key:
-        if pathlib.Path("/secrets/NUVOLOS_API_KEY").exists():
-            with pathlib.Path("/secrets/NUVOLOS_API_KEY").open(mode="r") as f:
-                api_key = f.read()
-    if get_default_config_path().exists():
+    if not get_default_config_path().exists():
+        return default_global_configs()
+    else:
         dc = get_global_dict_config().read()
+        api_key = from_variable("NUVOLOS_API_KEY")
         if api_key:
+            # Prioritize the environment variable
             dc["api_key"] = api_key
-            return dc
-        elif dc["api_key"]:
-            return get_global_dict_config().read()
-        else:
-            raise NuvolosException(
+        host = from_variable("NUVOLOS_API_HOST")
+        if host:
+            dc["host"] = host
+        if dc["api_key"] is None:
+            raise ClickException(
                 "Nuvolos CLI is not configured, please set your API key with `nuvolos config --api-key`."
             )
 
@@ -71,7 +78,7 @@ def get_config():
 def get_api_config():
     config = get_config()
     return nuvolos_client_api.Configuration(
-        host="https://nc-1590.s.nuvolos.nv-backend.nginx.nuvolos.cloud/",
+        host=config["host"],
         api_key={"ApiKeyAuth": config["api_key"]},
         api_key_prefix={"ApiKeyAuth": "basic"},
     )
@@ -90,13 +97,16 @@ def init_cli_config(
 
 
 def check_api_key_configured():
-    api_key = os.environ.get("NUVOLOS_API_KEY")
+    api_key = from_variable("NUVOLOS_API_KEY")
     if api_key is None:
-        gdc = get_global_dict_config()
-        global_config = gdc.read()
-        api_key = global_config.get("api_key")
+        if not get_default_config_path().exists():
+            raise ClickException(
+                "The Nuvolos API key must be set either as the NUVOLOS_API_KEY environment variable or with the `nuvolos configure --api-key` command."
+            )
+        gdc = get_global_dict_config().read()
+        api_key = gdc["api_key"]
         if api_key is None:
-            raise NuvolosException(
+            raise ClickException(
                 "The Nuvolos API key must be set either as the NUVOLOS_API_KEY environment variable or with the `nuvolos configure --api-key` command."
             )
     return api_key

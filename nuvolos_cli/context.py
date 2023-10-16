@@ -1,14 +1,12 @@
-from nuvolos_client_api.models.org_client_api import OrgClientAPI
-from .logging import clog
-from .exception import NuvolosException
+from click import ClickException
+
 from .config import get_api_config
+from .logging import clog
 
 import nuvolos_client_api
-from nuvolos_client_api.models.org_client_api import OrgClientAPI
-from nuvolos_client_api.models.org_space_limitied import OrgSpaceLimitied
+from nuvolos_client_api.models.org import Org
+from nuvolos_client_api.models.space import Space
 from nuvolos_client_api.rest import ApiException
-from .logging import clog
-from .exception import NuvolosException
 
 
 class NuvolosContext:
@@ -26,37 +24,37 @@ class NuvolosContext:
     def set_current_org_slug(self, slug: str):
         config = get_api_config()
         with nuvolos_client_api.ApiClient(config) as api_client:
-            api_instance = nuvolos_client_api.OrganizationsApi(api_client)
+            api_instance = nuvolos_client_api.OrganizationsV1Api(api_client)
             try:
                 self._current_org = api_instance.orgs_v1_org_slug_get(slug)
                 self._current_space = None
                 self._current_instance = None
                 self._current_snapshot = None
             except ApiException as e:
-                raise NuvolosException(
+                raise ClickException(
                     f"Exception when setting current organization by slug [{slug}]: {e}"
                 )
         clog.debug(f"Current org set to [{self._current_org.slug}]")
 
-    def set_current_org(self, org: OrgClientAPI):
+    def set_current_org(self, org: Org):
         if org:
             self._current_org = org
             clog.debug(f"Current org set to [{org.slug}]")
         else:
-            raise NuvolosException("No current organization provided.")
+            raise ClickException("No current organization provided.")
 
     def get_current_org(self):
         return self._current_org
 
-    def set_current_space(self, space: OrgSpaceLimitied):
+    def set_current_space(self, space: Space):
         if not self._current_org:
-            raise NuvolosException(
+            raise ClickException(
                 "Current Nuvolos organization not set, please choose an organization first."
             )
         if not space:
-            raise NuvolosException("No current space provided.")
+            raise ClickException("No current space provided.")
         if space.oid != self._current_org.oid:
-            raise NuvolosException(
+            raise ClickException(
                 f"Space [{space.slug}] does not belong to current organization [{self._current_org.slug}]."
             )
         self._current_space = space
