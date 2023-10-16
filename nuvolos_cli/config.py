@@ -49,7 +49,7 @@ def default_global_configs():
         "app_name": "nuvolos-cli",
         "nuvolos_cli_version": __version__,
         "api_key": from_variable("NUVOLOS_API_KEY"),
-        "host": from_variable("NUVOLOS_API_HOST", "https://az-api.nuvolos.cloud")
+        "host": from_variable("NUVOLOS_API_HOST", "https://az-api.nuvolos.cloud"),
     }
 
 
