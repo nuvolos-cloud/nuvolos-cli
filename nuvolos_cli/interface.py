@@ -72,16 +72,19 @@ def nv_list(ctx, **kwargs):
             if kwargs.get("instance"):
                 print_model(
                     list_snapshots(
-                        kwargs.get("org"),
-                        kwargs.get("space"),
-                        kwargs.get("instance"),
-                        kwargs.get("snapshot"),
+                        org_slug=kwargs.get("org"),
+                        space_slug=kwargs.get("space"),
+                        instance_slug=kwargs.get("instance"),
                     )
                 )
             else:
-                print_models(list_instances(kwargs.get("org"), kwargs.get("space")))
+                print_models(
+                    list_instances(
+                        org_slug=kwargs.get("org"), space_slug=kwargs.get("space")
+                    )
+                )
         else:
-            print_models(list_spaces(kwargs.get("org")))
+            print_models(list_spaces(org_slug=kwargs.get("org")))
     else:
         print_models(list_orgs())
 

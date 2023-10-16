@@ -27,7 +27,7 @@ setup(
     license="MIT",
     packages=["nuvolos_cli"],
     install_requires=[
-        "Nuvolos-Client-API",
+        f"Nuvolos-Client-API=={__nuvolos_client_api_version__}",
         "click",
         "click-log",
         "pyyaml",
