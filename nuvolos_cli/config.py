@@ -2,19 +2,13 @@ import os
 import yaml
 import pathlib
 
+from click import ClickException
+
 from .version import __version__
 from .logging import clog
-
-from .exception import (
-    NuvolosException,
-)
 from .version import __version__
 
 import nuvolos_client_api
-
-
-def get_local_config_path():
-    return pathlib.Path.cwd() / ".nuvolos" / "config.yaml"
 
 
 def get_default_config_path():
@@ -55,38 +49,34 @@ def default_global_configs():
         "app_name": "nuvolos-cli",
         "nuvolos_cli_version": __version__,
         "api_key": from_variable("NUVOLOS_API_KEY"),
-        "host": from_variable("NUVOLOS_API_HOST", "https://az-api.nuvolos.cloud")
+        "host": from_variable("NUVOLOS_API_HOST", "https://az-api.nuvolos.cloud"),
     }
 
 
 def get_global_dict_config():
-    return DictConfig(get_default_config_path(), default_global_configs)
-
-
-def get_local_dict_config():
-    return DictConfig(
-        pathlib.Path.cwd() / ".nuvolos" / "config.yaml", default_global_configs
-    )
-
-
-def get_config_path():
-    if get_local_config_path().exists():
-        return get_local_config_path()
-    elif get_default_config_path().exists():
-        return get_default_config_path()
-    else:
-        raise NuvolosException(
-            "Nuvolos CLI is not configured, please set your API key with `nuvolos config --api-key`."
-        )
+    return DictConfig(get_default_config_path(), default_global_configs())
 
 
 def get_config():
-    return get_local_dict_config()
+    if not get_default_config_path().exists():
+        return default_global_configs()
+    else:
+        dc = get_global_dict_config().read()
+        api_key = from_variable("NUVOLOS_API_KEY")
+        if api_key:
+            # Prioritize the environment variable
+            dc["api_key"] = api_key
+        host = from_variable("NUVOLOS_API_HOST")
+        if host:
+            dc["host"] = host
+        if dc["api_key"] is None:
+            raise ClickException(
+                "Nuvolos CLI is not configured, please set your API key with `nuvolos config --api-key`."
+            )
 
 
 def get_api_config():
-    dc = get_config()
-    config = dc.read()
+    config = get_config()
     return nuvolos_client_api.Configuration(
         host=config["host"],
         api_key={"ApiKeyAuth": config["api_key"]},
@@ -97,13 +87,6 @@ def get_api_config():
 def init_cli_config(
     api_key: str = None,
 ):
-    pdc = get_local_dict_config()
-    project_settings = pdc.read()
-    project_settings["nuvolos_cli_version"] = __version__
-    project_settings["api_key"] = api_key
-    pdc.write(project_settings)
-    clog.info(f"Nuvolos CLI configuration written to [{pdc.path}].")
-
     if not get_default_config_path().exists():
         gdc = get_global_dict_config()
         global_settings = gdc.read()
@@ -114,19 +97,18 @@ def init_cli_config(
 
 
 def check_api_key_configured():
-    api_key = os.environ.get("NUVOLOS_API_KEY")
+    api_key = from_variable("NUVOLOS_API_KEY")
     if api_key is None:
-        gdc = get_global_dict_config()
-        global_config = gdc.read()
-        api_key = global_config.get("api_key")
+        if not get_default_config_path().exists():
+            raise ClickException(
+                "The Nuvolos API key must be set either as the NUVOLOS_API_KEY environment variable or with the `nuvolos configure --api-key` command."
+            )
+        gdc = get_global_dict_config().read()
+        api_key = gdc["api_key"]
         if api_key is None:
-            ldc = get_local_dict_config()
-            local_config = ldc.read()
-            api_key = local_config.get("api_key")
-            if api_key is None:
-                raise NuvolosException(
-                    "The Nuvolos API key must be set either as the NUVOLOS_API_KEY environment variable or with the `nuvolos configure --api-key` command."
-                )
+            raise ClickException(
+                "The Nuvolos API key must be set either as the NUVOLOS_API_KEY environment variable or with the `nuvolos configure --api-key` command."
+            )
     return api_key
 
 
@@ -142,5 +124,5 @@ def info():
 """
     )
     clog.info(f"Version: {__version__}")
-    gc = get_config().read()
-    clog.info(f"The Nuvolos CLI config ({get_config_path()}):\n{yaml.dump(gc)}")
+    gc = get_config()
+    clog.info(f"The Nuvolos CLI config ({get_default_config_path()}):\n{yaml.dump(gc)}")

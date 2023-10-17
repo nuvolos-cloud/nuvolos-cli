@@ -78,15 +78,16 @@ def nv_list(ctx, **kwargs):
         if kwargs.get("space"):
             if kwargs.get("instance"):
                 res = list_snapshots(
-                    kwargs.get("org"),
-                    kwargs.get("space"),
-                    kwargs.get("instance"),
-                    kwargs.get("snapshot"),
-                )
+                        org_slug=kwargs.get("org"),
+                        space_slug=kwargs.get("space"),
+                        instance_slug=kwargs.get("instance"),
+                    )
             else:
-                res = list_instances(kwargs.get("org"), kwargs.get("space"))
+                res = list_instances(
+                        org_slug=kwargs.get("org"), space_slug=kwargs.get("space")
+                    )
         else:
-            res = list_spaces(kwargs.get("org"))
+            res = list_spaces(org_slug=kwargs.get("org"))
     else:
         res = list_orgs()
     return res
