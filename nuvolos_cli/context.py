@@ -1,5 +1,6 @@
 from click import ClickException
 
+from .api_client import NuvolosCliException
 from .config import get_api_config
 from .logging import clog
 
@@ -31,8 +32,9 @@ class NuvolosContext:
                 self._current_instance = None
                 self._current_snapshot = None
             except ApiException as e:
-                raise ClickException(
-                    f"Exception when setting current organization by slug [{slug}]: {e}"
+                raise NuvolosCliException.from_api_exception(
+                    e,
+                    f"Exception when setting current organization by slug [{slug}]: {e}",
                 )
         clog.debug(f"Current org set to [{self._current_org.slug}]")
 
