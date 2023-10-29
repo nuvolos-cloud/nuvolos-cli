@@ -1,5 +1,7 @@
 import click
 import click_log
+from click import ClickException
+
 from .logging import clog
 from .context import NuvolosContext
 from .config import init_cli_config, check_api_key_configured, info
@@ -10,8 +12,10 @@ from .api_client import (
     list_snapshots,
     list_apps,
     list_all_running_apps,
+    start_app,
+    stop_app,
 )
-from .utils import format_response, print_models_tabulated
+from .utils import format_response
 from .cli import NuvolosCli
 
 
@@ -67,9 +71,8 @@ def nv_cli_config(ctx, **kwargs):
     default="tabulated",
     help="Sets the output into the desired format",
 )
-@click.pass_context
 @format_response
-def nv_list(ctx, **kwargs):
+def nv_list(**kwargs):
     """
     Lists the Nuvolos organizations / spaces / instances / apps available to the current user
     """
@@ -78,14 +81,14 @@ def nv_list(ctx, **kwargs):
         if kwargs.get("space"):
             if kwargs.get("instance"):
                 res = list_snapshots(
-                        org_slug=kwargs.get("org"),
-                        space_slug=kwargs.get("space"),
-                        instance_slug=kwargs.get("instance"),
-                    )
+                    org_slug=kwargs.get("org"),
+                    space_slug=kwargs.get("space"),
+                    instance_slug=kwargs.get("instance"),
+                )
             else:
                 res = list_instances(
-                        org_slug=kwargs.get("org"), space_slug=kwargs.get("space")
-                    )
+                    org_slug=kwargs.get("org"), space_slug=kwargs.get("space")
+                )
         else:
             res = list_spaces(org_slug=kwargs.get("org"))
     else:
@@ -93,7 +96,13 @@ def nv_list(ctx, **kwargs):
     return res
 
 
-@nuvolos.command("apps")
+@nuvolos.group("apps")
+@click.pass_context
+def nv_apps(ctx, **kwargs):
+    pass
+
+
+@nv_apps.command("list")
 @click.option(
     "-o",
     "--org",
@@ -118,9 +127,8 @@ def nv_list(ctx, **kwargs):
     default="tabulated",
     help="Sets the output into the desired format",
 )
-@click.pass_context
 @format_response
-def nv_apps(ctx, **kwargs):
+def nv_apps_list(**kwargs):
     """
     Lists the Nuvolos applications available to the current user
     """
@@ -133,13 +141,136 @@ def nv_apps(ctx, **kwargs):
                     kwargs.get("space"),
                     kwargs.get("instance"),
                 )
-
             else:
-                res = list_apps(kwargs.get("org"), kwargs.get("space"))
+                raise ClickException(
+                    "Please specify an instance slug with the --instance parameter"
+                )
         else:
-            res = list_apps(kwargs.get("org"))
+            raise ClickException(
+                "Please specify a space slug with the --space parameter"
+            )
     else:
         res = list_all_running_apps()
+
+    return res
+
+
+@nv_apps.command("start")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The organization to use to list applications",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The space to use to list applications",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The instance to use to list applications",
+)
+@click.option(
+    "-a",
+    "--app",
+    type=int,
+    help="The ID of the application to start",
+)
+def nv_app_start(**kwargs):
+    """
+    Starts the Nuvolos application with the given ID
+    """
+    check_api_key_configured()
+    if kwargs.get("org"):
+        if kwargs.get("space"):
+            if kwargs.get("instance"):
+                if kwargs.get("app"):
+                    res = start_app(
+                        kwargs.get("org"),
+                        kwargs.get("space"),
+                        kwargs.get("instance"),
+                        kwargs.get("app"),
+                    )
+                else:
+                    raise ClickException(
+                        "Please specify an application ID with the --app parameter"
+                    )
+            else:
+                raise ClickException(
+                    "Please specify an instance slug with the --instance parameter"
+                )
+        else:
+            raise ClickException(
+                "Please specify a space slug with the --space parameter"
+            )
+    else:
+        raise ClickException(
+            "Please specify an organization slug with the --org parameter"
+        )
+
+    return res
+
+
+@nv_apps.command("stop")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The organization to use to list applications",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The space to use to list applications",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The instance to use to list applications",
+)
+@click.option(
+    "-a",
+    "--app",
+    type=int,
+    help="The ID of the application to start",
+)
+def nv_stop_app(**kwargs):
+    """
+    Stops the Nuvolos application with the given ID
+    """
+    check_api_key_configured()
+    if kwargs.get("org"):
+        if kwargs.get("space"):
+            if kwargs.get("instance"):
+                if kwargs.get("app"):
+                    res = stop_app(
+                        kwargs.get("org"),
+                        kwargs.get("space"),
+                        kwargs.get("instance"),
+                        kwargs.get("app"),
+                    )
+                else:
+                    raise ClickException(
+                        "Please specify an application ID with the --app parameter"
+                    )
+            else:
+                raise ClickException(
+                    "Please specify an instance slug with the --instance parameter"
+                )
+        else:
+            raise ClickException(
+                "Please specify a space slug with the --space parameter"
+            )
+    else:
+        raise ClickException(
+            "Please specify an organization slug with the --org parameter"
+        )
 
     return res
 
