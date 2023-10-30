@@ -3,6 +3,7 @@ from click import ClickException
 from .config import get_api_config
 
 import nuvolos_client_api
+from nuvolos_client_api.models import StartApp
 
 
 def _find_variables(tb, vars):
@@ -109,11 +110,21 @@ def list_all_running_apps():
             )
 
 
-def start_app(org_slug: str, space_slug: str, instance_slug: str, aid: int):
+def start_app(
+    org_slug: str, space_slug: str, instance_slug: str, aid: int, node_pool: str = None
+):
     config = get_api_config()
     with nuvolos_client_api.ApiClient(config) as api_client:
         api_instance = nuvolos_client_api.WorkloadsV1Api(api_client)
         try:
+            if node_pool:
+                return api_instance.workloads_v1_org_org_slug_space_space_slug_instance_instance_slug_app_aid_post(
+                    org_slug=org_slug,
+                    space_slug=space_slug,
+                    instance_slug=instance_slug,
+                    aid=aid,
+                    body=StartApp.from_dict({"node_pool": node_pool}),
+                )
             return api_instance.workloads_v1_org_org_slug_space_space_slug_instance_instance_slug_app_aid_post(
                 org_slug=org_slug,
                 space_slug=space_slug,

@@ -180,6 +180,12 @@ def nv_apps_list(**kwargs):
     type=int,
     help="The ID of the application to start",
 )
+@click.option(
+    "-n",
+    "--node-pool",
+    type=str,
+    help="The node pool to use to run the app",
+)
 def nv_app_start(**kwargs):
     """
     Starts the Nuvolos application with the given ID
@@ -194,6 +200,7 @@ def nv_app_start(**kwargs):
                         kwargs.get("space"),
                         kwargs.get("instance"),
                         kwargs.get("app"),
+                        kwargs.get("node_pool"),
                     )
                 else:
                     raise ClickException(
