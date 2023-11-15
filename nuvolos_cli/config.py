@@ -4,7 +4,6 @@ import pathlib
 
 from click import ClickException
 
-from .version import __version__
 from .logging import clog
 from .version import __version__
 
