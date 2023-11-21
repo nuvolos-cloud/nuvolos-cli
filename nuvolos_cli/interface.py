@@ -44,7 +44,36 @@ def nv_cli_config(**kwargs):
     )
 
 
-@nuvolos.command("list")
+@nuvolos.group("orgs")
+@click.pass_context
+def nv_orgs(ctx):
+    pass
+
+
+@nv_orgs.command("list")
+@click.option(
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format",
+)
+@click.pass_context
+@format_response
+def nv_orgs_list(ctx, **kwargs):
+    """
+    Lists the Nuvolos organizations available to the current user
+    """
+    res = list_orgs()
+    return res
+
+
+@nuvolos.group("spaces")
+@click.pass_context
+def nv_spaces(ctx):
+    pass
+
+
+@nv_spaces.command("list")
 @click.option(
     "-o",
     "--org",
@@ -52,10 +81,82 @@ def nv_cli_config(**kwargs):
     help="The organization to use to list spaces",
 )
 @click.option(
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format",
+)
+@click.pass_context
+@format_response
+def nv_orgs_list(ctx, **kwargs):
+    """
+    Lists the Nuvolos organizations / spaces / instances / apps available to the current user
+    """
+    check_api_key_configured()
+    if kwargs.get("org", ctx.obj.get("org_slug")):
+        return list_spaces(org_slug=kwargs.get("org", ctx.obj.get("org_slug")))
+    else:
+        raise ClickException("Please specify an org slug with the --org argument")
+
+
+@nuvolos.group("instances")
+@click.pass_context
+def nv_instances(ctx):
+    pass
+
+
+@nv_instances.command("list")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The organization to use to list instances",
+)
+@click.option(
     "-s",
     "--space",
     type=str,
     help="The space to use to list instances",
+)
+@click.pass_context
+@format_response
+def nv_instances_list(ctx, **kwargs):
+    """
+    Lists the Nuvolos instances available to the current user
+    """
+    check_api_key_configured()
+    if kwargs.get("org", ctx.obj.get("org_slug")):
+        if kwargs.get("space", ctx.obj.get("space_slug")):
+            return list_instances(
+                kwargs.get("org", ctx.obj.get("org_slug")),
+                kwargs.get("space", ctx.obj.get("space_slug")),
+            )
+        else:
+            raise ClickException(
+                "Please specify a space slug with the --space argument"
+            )
+    else:
+        raise ClickException("Please specify an org slug with the --org argument")
+
+
+@nuvolos.group("snapshots")
+@click.pass_context
+def nv_snapshots(ctx):
+    pass
+
+
+@nv_snapshots.command("list")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The organization to use to list snapshots",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The space to use to list snapshots",
 )
 @click.option(
     "-i",
@@ -69,31 +170,31 @@ def nv_cli_config(**kwargs):
     default="tabulated",
     help="Sets the output into the desired format",
 )
-@format_response
 @click.pass_context
-def nv_list(ctx, **kwargs):
+@format_response
+def nv_snapshots_list(ctx, **kwargs):
     """
-    Lists the Nuvolos organizations / spaces / instances / apps available to the current user
+    Lists the Nuvolos snapshots available to the current user
     """
     check_api_key_configured()
     if kwargs.get("org", ctx.obj.get("org_slug")):
         if kwargs.get("space", ctx.obj.get("space_slug")):
             if kwargs.get("instance", ctx.obj.get("instance_slug")):
-                res = list_snapshots(
-                    org_slug=kwargs.get("org", ctx.obj.get("org_slug")),
-                    space_slug=kwargs.get("space", ctx.obj.get("space_slug")),
-                    instance_slug=kwargs.get("instance", ctx.obj.get("instance_slug")),
+                return list_snapshots(
+                    kwargs.get("org", ctx.obj.get("org_slug")),
+                    kwargs.get("space", ctx.obj.get("space_slug")),
+                    kwargs.get("instance", ctx.obj.get("instance_slug")),
                 )
             else:
-                res = list_instances(
-                    org_slug=kwargs.get("org", ctx.obj.get("org_slug")),
-                    space_slug=kwargs.get("space", ctx.obj.get("space_slug")),
+                raise ClickException(
+                    "Please specify an instance slug with the --instance argument"
                 )
         else:
-            res = list_spaces(org_slug=kwargs.get("org", ctx.obj.get("org_slug")))
+            raise ClickException(
+                "Please specify a space slug with the --space argument"
+            )
     else:
-        res = list_orgs()
-    return res
+        raise ClickException("Please specify an org slug with the --org argument")
 
 
 @nuvolos.group("apps")
