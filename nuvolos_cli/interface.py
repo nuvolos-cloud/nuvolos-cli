@@ -88,13 +88,16 @@ def nv_spaces(ctx):
 )
 @click.pass_context
 @format_response
-def nv_orgs_list(ctx, **kwargs):
+def nv_spaces_list(ctx, **kwargs):
     """
     Lists the Nuvolos organizations / spaces / instances / apps available to the current user
     """
     check_api_key_configured()
-    if kwargs.get("org", ctx.obj.get("org_slug")):
-        return list_spaces(org_slug=kwargs.get("org", ctx.obj.get("org_slug")))
+    if kwargs.get("org") is not None or ctx.obj.get("org_slug"):
+        return list_orgs(
+            kwargs["org"] if kwargs.get("org") is not None else ctx.obj.get("org_slug"),
+        )
+
     else:
         raise ClickException("Please specify an org slug with the --org argument")
 
@@ -125,11 +128,15 @@ def nv_instances_list(ctx, **kwargs):
     Lists the Nuvolos instances available to the current user
     """
     check_api_key_configured()
-    if kwargs.get("org", ctx.obj.get("org_slug")):
-        if kwargs.get("space", ctx.obj.get("space_slug")):
+    if kwargs.get("org") is not None or ctx.obj.get("org_slug"):
+        if kwargs.get("space") is not None or ctx.obj.get("space_slug"):
             return list_instances(
-                kwargs.get("org", ctx.obj.get("org_slug")),
-                kwargs.get("space", ctx.obj.get("space_slug")),
+                kwargs["org"]
+                if kwargs.get("org") is not None
+                else ctx.obj.get("org_slug"),
+                kwargs["space"]
+                if kwargs.get("space") is not None
+                else ctx.obj.get("space_slug"),
             )
         else:
             raise ClickException(
@@ -177,13 +184,19 @@ def nv_snapshots_list(ctx, **kwargs):
     Lists the Nuvolos snapshots available to the current user
     """
     check_api_key_configured()
-    if kwargs.get("org", ctx.obj.get("org_slug")):
-        if kwargs.get("space", ctx.obj.get("space_slug")):
-            if kwargs.get("instance", ctx.obj.get("instance_slug")):
+    if kwargs.get("org") is not None or ctx.obj.get("org_slug"):
+        if kwargs.get("space") is not None or ctx.obj.get("space_slug"):
+            if kwargs.get("instance") is not None or ctx.obj.get("instance_slug"):
                 return list_snapshots(
-                    kwargs.get("org", ctx.obj.get("org_slug")),
-                    kwargs.get("space", ctx.obj.get("space_slug")),
-                    kwargs.get("instance", ctx.obj.get("instance_slug")),
+                    kwargs["org"]
+                    if kwargs.get("org") is not None
+                    else ctx.obj.get("org_slug"),
+                    kwargs["space"]
+                    if kwargs.get("space") is not None
+                    else ctx.obj.get("space_slug"),
+                    kwargs["instance"]
+                    if kwargs.get("instance") is not None
+                    else ctx.obj.get("instance_slug"),
                 )
             else:
                 raise ClickException(
@@ -234,13 +247,19 @@ def nv_apps_list(ctx, **kwargs):
     Lists the Nuvolos applications available to the current user
     """
     check_api_key_configured()
-    if kwargs.get("org", ctx.obj.get("org_slug")):
-        if kwargs.get("space", ctx.obj.get("space_slug")):
-            if kwargs.get("instance", ctx.obj.get("instance_slug")):
-                res = list_apps(
-                    kwargs.get("org", ctx.obj.get("org_slug")),
-                    kwargs.get("space", ctx.obj.get("space_slug")),
-                    kwargs.get("instance", ctx.obj.get("instance_slug")),
+    if kwargs.get("org") is not None or ctx.obj.get("org_slug"):
+        if kwargs.get("space") is not None or ctx.obj.get("space_slug"):
+            if kwargs.get("instance") is not None or ctx.obj.get("instance_slug"):
+                return list_apps(
+                    kwargs["org"]
+                    if kwargs.get("org") is not None
+                    else ctx.obj.get("org_slug"),
+                    kwargs["space"]
+                    if kwargs.get("space") is not None
+                    else ctx.obj.get("space_slug"),
+                    kwargs["instance"]
+                    if kwargs.get("instance") is not None
+                    else ctx.obj.get("instance_slug"),
                 )
             else:
                 raise ClickException(
@@ -252,7 +271,6 @@ def nv_apps_list(ctx, **kwargs):
             )
     else:
         raise ClickException("Please specify an org slug with the --org argument")
-    return res
 
 
 @nv_apps.command("start")
@@ -319,8 +337,9 @@ def nv_stop_app(**kwargs):
 
 
 @nuvolos.command("info")
-def nv_info():
+@click.pass_context
+def nv_info(ctx):
     """
     Prints information about the Nuvolos CLI
     """
-    info()
+    info(nuvolos_ctx=ctx.obj)

@@ -111,7 +111,7 @@ def check_api_key_configured():
     return api_key
 
 
-def info():
+def info(nuvolos_ctx=None):
     clog.info(
         r"""
  _   _                  _              ____ _     ___ 
@@ -124,4 +124,13 @@ def info():
     )
     clog.info(f"Version: {__version__}")
     gc = get_config()
-    clog.info(f"The Nuvolos CLI config ({get_default_config_path()}):\n{yaml.dump(gc)}")
+    if nuvolos_ctx:
+        clog.info(
+            f"""\nThe Nuvolos CLI context:
+Organization:\t{nuvolos_ctx['org_slug']}
+Space:\t\t{nuvolos_ctx['space_slug']}
+Instance:\t{nuvolos_ctx['instance_slug']}"""
+        )
+    clog.info(
+        f"\nThe Nuvolos CLI config ({get_default_config_path()}):\n{yaml.dump(gc)}"
+    )
