@@ -94,7 +94,7 @@ def nv_spaces_list(ctx, **kwargs):
     """
     check_api_key_configured()
     if kwargs.get("org") is not None or ctx.obj.get("org_slug"):
-        return list_orgs(
+        return list_spaces(
             kwargs["org"] if kwargs.get("org") is not None else ctx.obj.get("org_slug"),
         )
 
