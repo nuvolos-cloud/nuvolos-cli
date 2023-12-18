@@ -78,7 +78,7 @@ def nv_spaces(ctx):
     "-o",
     "--org",
     type=str,
-    help="The organization to use to list spaces",
+    help="The slug of the Nuvolos organization to use to list spaces",
 )
 @click.option(
     "--format",
@@ -95,7 +95,9 @@ def nv_spaces_list(ctx, **kwargs):
     check_api_key_configured()
     if kwargs.get("org") is not None or ctx.obj.get("org_slug"):
         return list_spaces(
-            kwargs["org"] if kwargs.get("org") is not None else ctx.obj.get("org_slug"),
+            org_slug=kwargs["org"]
+            if kwargs.get("org") is not None
+            else ctx.obj.get("org_slug"),
         )
 
     else:
@@ -113,13 +115,19 @@ def nv_instances(ctx):
     "-o",
     "--org",
     type=str,
-    help="The organization to use to list instances",
+    help="The slug of the Nuvolos organization to use to list instances",
 )
 @click.option(
     "-s",
     "--space",
     type=str,
-    help="The space to use to list instances",
+    help="The slug of the Nuvolos space to use to list instances",
+)
+@click.option(
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format",
 )
 @click.pass_context
 @format_response
@@ -131,10 +139,10 @@ def nv_instances_list(ctx, **kwargs):
     if kwargs.get("org") is not None or ctx.obj.get("org_slug"):
         if kwargs.get("space") is not None or ctx.obj.get("space_slug"):
             return list_instances(
-                kwargs["org"]
+                org_slug=kwargs["org"]
                 if kwargs.get("org") is not None
                 else ctx.obj.get("org_slug"),
-                kwargs["space"]
+                space_slug=kwargs["space"]
                 if kwargs.get("space") is not None
                 else ctx.obj.get("space_slug"),
             )
@@ -157,19 +165,19 @@ def nv_snapshots(ctx):
     "-o",
     "--org",
     type=str,
-    help="The organization to use to list snapshots",
+    help="The slug of the Nuvolos organization to use to list snapshots",
 )
 @click.option(
     "-s",
     "--space",
     type=str,
-    help="The space to use to list snapshots",
+    help="The slug of the Nuvolos space to use to list snapshots",
 )
 @click.option(
     "-i",
     "--instance",
     type=str,
-    help="The instance to use to list snapshots",
+    help="The slug of the Nuvolos instance to use to list snapshots",
 )
 @click.option(
     "--format",
@@ -188,13 +196,13 @@ def nv_snapshots_list(ctx, **kwargs):
         if kwargs.get("space") is not None or ctx.obj.get("space_slug"):
             if kwargs.get("instance") is not None or ctx.obj.get("instance_slug"):
                 return list_snapshots(
-                    kwargs["org"]
+                    org_slug=kwargs["org"]
                     if kwargs.get("org") is not None
                     else ctx.obj.get("org_slug"),
-                    kwargs["space"]
+                    space_slug=kwargs["space"]
                     if kwargs.get("space") is not None
                     else ctx.obj.get("space_slug"),
-                    kwargs["instance"]
+                    instance_slug=kwargs["instance"]
                     if kwargs.get("instance") is not None
                     else ctx.obj.get("instance_slug"),
                 )
@@ -220,19 +228,26 @@ def nv_apps():
     "-o",
     "--org",
     type=str,
-    help="The organization to use to list applications",
+    help="The slug of the Nuvolos organization to use to list applications",
 )
 @click.option(
     "-s",
     "--space",
     type=str,
-    help="The space to use to list applications",
+    help="The slug of the Nuvolos space to use to list applications",
 )
 @click.option(
     "-i",
     "--instance",
     type=str,
-    help="The instance to use to list applications",
+    help="The slug of the Nuvolos instance to use to list applications",
+)
+@click.option(
+    "-p",
+    "--snapshot",
+    type=str,
+    default="development",
+    help="The slug of the Nuvolos snapshot to use to list applications",
 )
 @click.option(
     "--format",
@@ -251,15 +266,16 @@ def nv_apps_list(ctx, **kwargs):
         if kwargs.get("space") is not None or ctx.obj.get("space_slug"):
             if kwargs.get("instance") is not None or ctx.obj.get("instance_slug"):
                 return list_apps(
-                    kwargs["org"]
+                    org_slug=kwargs["org"]
                     if kwargs.get("org") is not None
                     else ctx.obj.get("org_slug"),
-                    kwargs["space"]
+                    space_slug=kwargs["space"]
                     if kwargs.get("space") is not None
                     else ctx.obj.get("space_slug"),
-                    kwargs["instance"]
+                    instance_slug=kwargs["instance"]
                     if kwargs.get("instance") is not None
                     else ctx.obj.get("instance_slug"),
+                    snapshot_slug=kwargs["snapshot"],
                 )
             else:
                 raise ClickException(
@@ -275,10 +291,28 @@ def nv_apps_list(ctx, **kwargs):
 
 @nv_apps.command("start")
 @click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization to use to start an application",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space to use to start an application",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The slug of the Nuvolos instance to use to start an application",
+)
+@click.option(
     "-a",
     "--app",
-    type=int,
-    help="The ID of the application to start",
+    type=str,
+    help="The slug of the Nuvolos application to start",
     required=True,
 )
 @click.option(
@@ -287,13 +321,23 @@ def nv_apps_list(ctx, **kwargs):
     type=str,
     help="The node pool to use to run the app",
 )
-def nv_app_start(**kwargs):
+@click.pass_context
+def nv_apps_start(ctx, **kwargs):
     """
     Starts the Nuvolos application with the given ID
     """
     check_api_key_configured()
     res = start_app(
-        aid=kwargs.get("app"),
+        org_slug=kwargs["org"]
+        if kwargs.get("org") is not None
+        else ctx.obj.get("org_slug"),
+        space_slug=kwargs["space"]
+        if kwargs.get("space") is not None
+        else ctx.obj.get("space_slug"),
+        instance_slug=kwargs["instance"]
+        if kwargs.get("instance") is not None
+        else ctx.obj.get("instance_slug"),
+        app_slug=kwargs.get("app"),
         node_pool=kwargs.get("node_pool"),
     )
     return res
@@ -301,19 +345,47 @@ def nv_app_start(**kwargs):
 
 @nv_apps.command("stop")
 @click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization to use to stop an application",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space to use to stop an application",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The slug of the Nuvolos instance to use to stop an application",
+)
+@click.option(
     "-a",
     "--app",
-    type=int,
-    help="The ID of the application to start",
+    type=str,
+    help="The slug of the Nuvolos application to stop",
     required=True,
 )
-def nv_stop_app(**kwargs):
+@click.pass_context
+def nv_apps_stop(ctx, **kwargs):
     """
     Stops the Nuvolos application with the given ID
     """
     check_api_key_configured()
     res = stop_app(
-        aid=kwargs.get("app"),
+        org_slug=kwargs["org"]
+        if kwargs.get("org") is not None
+        else ctx.obj.get("org_slug"),
+        space_slug=kwargs["space"]
+        if kwargs.get("space") is not None
+        else ctx.obj.get("space_slug"),
+        instance_slug=kwargs["instance"]
+        if kwargs.get("instance") is not None
+        else ctx.obj.get("instance_slug"),
+        app_slug=kwargs.get("app"),
     )
 
     return res
@@ -327,7 +399,7 @@ def nv_stop_app(**kwargs):
     help="Sets the output into the desired format",
 )
 @format_response
-def nv_stop_app(**kwargs):
+def nv_apps_running(**kwargs):
     """
     Lists all running Nuvolos applications of the user
     """

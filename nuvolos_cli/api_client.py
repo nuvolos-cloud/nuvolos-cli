@@ -7,16 +7,15 @@ import nuvolos_client_api
 from nuvolos_client_api.models import StartApp
 
 
-def _find_variables(tb, vars):
-    """Find the values of variables in a traceback."""
-    to_find = list(vars)
+def _find_variables(tb, variables):
+    to_find = list(variables)
     found = {}
     for var in to_find:
         if var in tb.tb_frame.f_locals:
-            vars.remove(var)
+            variables.remove(var)
             found[var] = tb.tb_frame.f_locals[var]
-    if vars and tb.tb_next:
-        found.update(_find_variables(tb.tb_next, vars))
+    if variables and tb.tb_next:
+        found.update(_find_variables(tb.tb_next, variables))
     return found
 
 
@@ -92,7 +91,12 @@ def list_snapshots(org_slug: str, space_slug: str, instance_slug: str):
             )
 
 
-def list_apps(org_slug: str, space_slug: str, instance_slug: str):
+def list_apps(
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    snapshot_slug: str,
+):
     config = get_api_config()
     with nuvolos_client_api.ApiClient(config) as api_client:
         api_instance = nuvolos_client_api.AppsV1Api(api_client)
@@ -101,7 +105,7 @@ def list_apps(org_slug: str, space_slug: str, instance_slug: str):
                 org_slug=org_slug,
                 space_slug=space_slug,
                 instance_slug=instance_slug,
-                snapshot_slug="development",
+                snapshot_slug=snapshot_slug,
             )
         except nuvolos_client_api.ApiException as e:
             raise NuvolosCliException.from_api_exception(
@@ -122,42 +126,57 @@ def list_all_running_apps():
             )
 
 
-def start_app(aid: int, node_pool: str = None):
+def start_app(
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    app_slug: str,
+    node_pool: str = None,
+):
     config = get_api_config()
     with nuvolos_client_api.ApiClient(config) as api_client:
         api_instance = nuvolos_client_api.WorkloadsV1Api(api_client)
         try:
             if node_pool:
                 res = api_instance.create_workload(
-                    aid=aid,
+                    org_slug=org_slug,
+                    space_slug=space_slug,
+                    instance_slug=instance_slug,
+                    app_slug=app_slug,
                     body=StartApp.from_dict({"node_pool": node_pool}),
                 )
                 clog.info(
-                    f"App [{aid}] successfully started on node pool [{node_pool}]:\n{res}"
+                    f"App [{app_slug}] successfully started on node pool [{node_pool}]:\n{res}"
                 )
             else:
                 res = api_instance.create_workload(
-                    aid=aid,
+                    org_slug=org_slug,
+                    space_slug=space_slug,
+                    instance_slug=instance_slug,
+                    app_slug=app_slug,
                 )
-                clog.info(f"App [{aid}] successfully started:\n{res}")
+                clog.info(f"App [{app_slug}] successfully started:\n{res}")
         except nuvolos_client_api.ApiException as e:
             raise NuvolosCliException.from_api_exception(
                 e,
-                f"Exception when starting Nuvolos app [{aid}]: {e}",
+                f"Exception when starting Nuvolos app [{app_slug}]: {e}",
             )
 
 
-def stop_app(aid: int):
+def stop_app(org_slug: str, space_slug: str, instance_slug: str, app_slug: str):
     config = get_api_config()
     with nuvolos_client_api.ApiClient(config) as api_client:
         api_instance = nuvolos_client_api.WorkloadsV1Api(api_client)
         try:
             api_instance.stop_workload(
-                aid=aid,
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                app_slug=app_slug,
             )
-            clog.info(f"App [{aid}] successfully stopped")
+            clog.info(f"App [{app_slug}] successfully stopped")
         except nuvolos_client_api.ApiException as e:
             raise NuvolosCliException.from_api_exception(
                 e,
-                f"Exception when stopping Nuvolos app [{aid}]: {e}",
+                f"Exception when stopping Nuvolos app [{app_slug}]: {e}",
             )
