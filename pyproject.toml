@@ -1,11 +1,11 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"
 
 
 [project]
 name = "nuvolos-cli"
-version = "0.0.10"
+dynamic = ["version"]
 description = "Command-line interface for Nuvolos"
 authors = [
     {name = "Alphacruncher", email = "support@nuvolos.cloud"}
@@ -34,6 +34,9 @@ dependencies = [
     "Nuvolos-Client-API"
 ]
 # TODO add minimum version to Nuvolos-Client-API
+
+
+[tool.setuptools_scm]
 
 
 [project.urls]
