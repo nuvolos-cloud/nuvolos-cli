@@ -1,6 +1,4 @@
-markdown
 click
-mkdocs-click
 click-log
 pyyaml
 semver
