@@ -4,8 +4,6 @@ from pydantic import BaseModel
 from tabulate import tabulate
 import yaml
 
-from .exception import NuvolosException
-
 
 def print_model_tabulated(model: BaseModel, tablefmt="github"):
     click.echo(tabulate(model.dict(), tablefmt=tablefmt, headers="keys"))
@@ -36,6 +34,6 @@ def format_response(f):
         elif format_ == "yaml":
             return print_models_yaml(res)
         else:
-            raise NuvolosException(f"{format_} is not a valid format option")
+            raise click.ClickException(f"{format_} is not a valid format option")
 
     return wrapper
