@@ -1,20 +1,21 @@
 from click import ClickException
 
+from .logging import clog
 from .config import get_api_config
 
 import nuvolos_client_api
+from nuvolos_client_api.models import StartApp
 
 
-def _find_variables(tb, vars):
-    """Find the values of variables in a traceback."""
-    to_find = list(vars)
+def _find_variables(tb, variables):
+    to_find = list(variables)
     found = {}
     for var in to_find:
         if var in tb.tb_frame.f_locals:
-            vars.remove(var)
+            variables.remove(var)
             found[var] = tb.tb_frame.f_locals[var]
-    if vars and tb.tb_next:
-        found.update(_find_variables(tb.tb_next, vars))
+    if variables and tb.tb_next:
+        found.update(_find_variables(tb.tb_next, variables))
     return found
 
 
@@ -41,7 +42,7 @@ def list_orgs():
     with nuvolos_client_api.ApiClient(config) as api_client:
         api_instance = nuvolos_client_api.OrganizationsV1Api(api_client)
         try:
-            return api_instance.orgs_v1_get()
+            return api_instance.list_orgs()
         except nuvolos_client_api.ApiException as e:
             raise NuvolosCliException.from_api_exception(
                 e, f"Exception when listing Nuvolos organizations: {e}"
@@ -53,7 +54,7 @@ def list_spaces(org_slug: str):
     with nuvolos_client_api.ApiClient(config) as api_client:
         api_instance = nuvolos_client_api.SpacesV1Api(api_client)
         try:
-            return api_instance.spaces_v1_org_slug_get(slug=org_slug)
+            return api_instance.list_spaces(slug=org_slug)
         except nuvolos_client_api.ApiException as e:
             raise NuvolosCliException.from_api_exception(
                 e, f"Exception when listing Nuvolos spaces for org [{org_slug}]: {e}"
@@ -65,9 +66,7 @@ def list_instances(org_slug: str, space_slug: str):
     with nuvolos_client_api.ApiClient(config) as api_client:
         api_instance = nuvolos_client_api.InstancesV1Api(api_client)
         try:
-            return api_instance.instances_v1_org_org_slug_space_space_slug_get(
-                org_slug=org_slug, space_slug=space_slug
-            )
+            return api_instance.list_instances(org_slug=org_slug, space_slug=space_slug)
         except nuvolos_client_api.ApiException as e:
             raise NuvolosCliException.from_api_exception(
                 e,
@@ -76,11 +75,43 @@ def list_instances(org_slug: str, space_slug: str):
 
 
 def list_snapshots(org_slug: str, space_slug: str, instance_slug: str):
-    pass
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.SnapshotsV1Api(api_client)
+        try:
+            return api_instance.list_snapshots(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when listing Nuvolos snapshots for org [{org_slug}], space [{space_slug}] and instance [{instance_slug}]: {e}",
+            )
 
 
-def list_apps(org_slug: str, space_slug: str, instance_slug: str):
-    pass
+def list_apps(
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    snapshot_slug: str,
+):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.AppsV1Api(api_client)
+        try:
+            return api_instance.list_apps(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                snapshot_slug=snapshot_slug,
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when listing Nuvolos apps for org [{org_slug}], space [{space_slug}] and instance [{instance_slug}]: {e}",
+            )
 
 
 def list_all_running_apps():
@@ -88,8 +119,64 @@ def list_all_running_apps():
     with nuvolos_client_api.ApiClient(config) as api_client:
         api_instance = nuvolos_client_api.WorkloadsV1Api(api_client)
         try:
-            return api_instance.workloads_v1_get()
+            return api_instance.get_workloads()
         except nuvolos_client_api.ApiException as e:
             raise NuvolosCliException.from_api_exception(
                 e, f"Exception when listing running Nuvolos apps: {e}"
+            )
+
+
+def start_app(
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    app_slug: str,
+    node_pool: str = None,
+):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.WorkloadsV1Api(api_client)
+        try:
+            if node_pool:
+                res = api_instance.create_workload(
+                    org_slug=org_slug,
+                    space_slug=space_slug,
+                    instance_slug=instance_slug,
+                    app_slug=app_slug,
+                    body=StartApp.from_dict({"node_pool": node_pool}),
+                )
+                clog.info(
+                    f"App [{app_slug}] successfully started on node pool [{node_pool}]:\n{res}"
+                )
+            else:
+                res = api_instance.create_workload(
+                    org_slug=org_slug,
+                    space_slug=space_slug,
+                    instance_slug=instance_slug,
+                    app_slug=app_slug,
+                )
+                clog.info(f"App [{app_slug}] successfully started:\n{res}")
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when starting Nuvolos app [{app_slug}]: {e}",
+            )
+
+
+def stop_app(org_slug: str, space_slug: str, instance_slug: str, app_slug: str):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.WorkloadsV1Api(api_client)
+        try:
+            api_instance.stop_workload(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                app_slug=app_slug,
+            )
+            clog.info(f"App [{app_slug}] successfully stopped")
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when stopping Nuvolos app [{app_slug}]: {e}",
             )
