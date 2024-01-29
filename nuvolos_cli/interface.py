@@ -388,16 +388,11 @@ def nv_apps_execute(ctx, **kwargs):
     Executes a command in a Nuvolos application.
     """
     check_api_key_configured()
+    snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
     res = execute_command_in_app(
-        org_slug=kwargs["org"]
-        if kwargs.get("org") is not None
-        else ctx.obj.get("org_slug"),
-        space_slug=kwargs["space"]
-        if kwargs.get("space") is not None
-        else ctx.obj.get("space_slug"),
-        instance_slug=kwargs["instance"]
-        if kwargs.get("instance") is not None
-        else ctx.obj.get("instance_slug"),
+        org_slug=snapshot_ctx.get("org_slug"),
+        space_slug=snapshot_ctx.get("space_slug"),
+        instance_slug=snapshot_ctx.get("instance_slug"),
         app_slug=kwargs.get("app"),
         command=kwargs.get("command"),
     )

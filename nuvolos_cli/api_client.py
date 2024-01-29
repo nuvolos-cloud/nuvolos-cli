@@ -42,7 +42,7 @@ def list_orgs():
     with nuvolos_client_api.ApiClient(config) as api_client:
         api_instance = nuvolos_client_api.OrganizationsV1Api(api_client)
         try:
-            return api_instance.list_orgs()
+            return api_instance.get_orgs()
         except nuvolos_client_api.ApiException as e:
             raise NuvolosCliException.from_api_exception(
                 e, f"Exception when listing Nuvolos organizations: {e}"
@@ -54,7 +54,7 @@ def list_spaces(org_slug: str):
     with nuvolos_client_api.ApiClient(config) as api_client:
         api_instance = nuvolos_client_api.SpacesV1Api(api_client)
         try:
-            return api_instance.list_spaces(slug=org_slug)
+            return api_instance.get_spaces(slug=org_slug)
         except nuvolos_client_api.ApiException as e:
             raise NuvolosCliException.from_api_exception(
                 e, f"Exception when listing Nuvolos spaces for org [{org_slug}]: {e}"
@@ -66,7 +66,7 @@ def list_instances(org_slug: str, space_slug: str):
     with nuvolos_client_api.ApiClient(config) as api_client:
         api_instance = nuvolos_client_api.InstancesV1Api(api_client)
         try:
-            return api_instance.list_instances(org_slug=org_slug, space_slug=space_slug)
+            return api_instance.get_instances(org_slug=org_slug, space_slug=space_slug)
         except nuvolos_client_api.ApiException as e:
             raise NuvolosCliException.from_api_exception(
                 e,
@@ -79,7 +79,7 @@ def list_snapshots(org_slug: str, space_slug: str, instance_slug: str):
     with nuvolos_client_api.ApiClient(config) as api_client:
         api_instance = nuvolos_client_api.SnapshotsV1Api(api_client)
         try:
-            return api_instance.list_snapshots(
+            return api_instance.get_snapshots(
                 org_slug=org_slug,
                 space_slug=space_slug,
                 instance_slug=instance_slug,
@@ -101,7 +101,7 @@ def list_apps(
     with nuvolos_client_api.ApiClient(config) as api_client:
         api_instance = nuvolos_client_api.AppsV1Api(api_client)
         try:
-            return api_instance.list_apps(
+            return api_instance.get_apps(
                 org_slug=org_slug,
                 space_slug=space_slug,
                 instance_slug=instance_slug,
@@ -168,7 +168,7 @@ def stop_app(org_slug: str, space_slug: str, instance_slug: str, app_slug: str):
     with nuvolos_client_api.ApiClient(config) as api_client:
         api_instance = nuvolos_client_api.WorkloadsV1Api(api_client)
         try:
-            api_instance.stop_workload(
+            api_instance.delete_workload(
                 org_slug=org_slug,
                 space_slug=space_slug,
                 instance_slug=instance_slug,
