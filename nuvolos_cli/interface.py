@@ -2,7 +2,6 @@ import os
 import json
 import click
 import click_log
-from click import ClickException
 
 from .logging import clog
 from .config import init_cli_config, check_api_key_configured, info
@@ -16,7 +15,12 @@ from .api_client import (
     start_app,
     stop_app,
 )
-from .utils import format_response
+from .utils import (
+    format_response,
+    get_effective_snapshot_context,
+    get_effective_instance_context,
+    get_effective_space_context,
+)
 
 
 @click.group("nuvolos")
@@ -93,15 +97,8 @@ def nv_spaces_list(ctx, **kwargs):
     Lists the Nuvolos organizations / spaces / instances / apps available to the current user
     """
     check_api_key_configured()
-    if kwargs.get("org") is not None or ctx.obj.get("org_slug"):
-        return list_spaces(
-            org_slug=kwargs["org"]
-            if kwargs.get("org") is not None
-            else ctx.obj.get("org_slug"),
-        )
-
-    else:
-        raise ClickException("Please specify an org slug with the --org argument")
+    space_ctx = get_effective_space_context(ctx, **kwargs)
+    return list_spaces(org_slug=space_ctx.get("org_slug"))
 
 
 @nuvolos.group("instances")
@@ -136,22 +133,10 @@ def nv_instances_list(ctx, **kwargs):
     Lists the Nuvolos instances available to the current user
     """
     check_api_key_configured()
-    if kwargs.get("org") is not None or ctx.obj.get("org_slug"):
-        if kwargs.get("space") is not None or ctx.obj.get("space_slug"):
-            return list_instances(
-                org_slug=kwargs["org"]
-                if kwargs.get("org") is not None
-                else ctx.obj.get("org_slug"),
-                space_slug=kwargs["space"]
-                if kwargs.get("space") is not None
-                else ctx.obj.get("space_slug"),
-            )
-        else:
-            raise ClickException(
-                "Please specify a space slug with the --space argument"
-            )
-    else:
-        raise ClickException("Please specify an org slug with the --org argument")
+    instance_ctx = get_effective_instance_context(ctx, **kwargs)
+    return list_instances(
+        org_slug=instance_ctx.get("org_slug"), space_slug=instance_ctx.get("space_lug")
+    )
 
 
 @nuvolos.group("snapshots")
@@ -192,30 +177,12 @@ def nv_snapshots_list(ctx, **kwargs):
     Lists the Nuvolos snapshots available to the current user
     """
     check_api_key_configured()
-    if kwargs.get("org") is not None or ctx.obj.get("org_slug"):
-        if kwargs.get("space") is not None or ctx.obj.get("space_slug"):
-            if kwargs.get("instance") is not None or ctx.obj.get("instance_slug"):
-                return list_snapshots(
-                    org_slug=kwargs["org"]
-                    if kwargs.get("org") is not None
-                    else ctx.obj.get("org_slug"),
-                    space_slug=kwargs["space"]
-                    if kwargs.get("space") is not None
-                    else ctx.obj.get("space_slug"),
-                    instance_slug=kwargs["instance"]
-                    if kwargs.get("instance") is not None
-                    else ctx.obj.get("instance_slug"),
-                )
-            else:
-                raise ClickException(
-                    "Please specify an instance slug with the --instance argument"
-                )
-        else:
-            raise ClickException(
-                "Please specify a space slug with the --space argument"
-            )
-    else:
-        raise ClickException("Please specify an org slug with the --org argument")
+    snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    return list_snapshots(
+        org_slug=snapshot_ctx.get("org_slug"),
+        space_slug=snapshot_ctx.get("space_slug"),
+        instance_slug=snapshot_ctx.get("instance_slug"),
+    )
 
 
 @nuvolos.group("apps")
@@ -262,31 +229,13 @@ def nv_apps_list(ctx, **kwargs):
     Lists the Nuvolos applications available to the current user
     """
     check_api_key_configured()
-    if kwargs.get("org") is not None or ctx.obj.get("org_slug"):
-        if kwargs.get("space") is not None or ctx.obj.get("space_slug"):
-            if kwargs.get("instance") is not None or ctx.obj.get("instance_slug"):
-                return list_apps(
-                    org_slug=kwargs["org"]
-                    if kwargs.get("org") is not None
-                    else ctx.obj.get("org_slug"),
-                    space_slug=kwargs["space"]
-                    if kwargs.get("space") is not None
-                    else ctx.obj.get("space_slug"),
-                    instance_slug=kwargs["instance"]
-                    if kwargs.get("instance") is not None
-                    else ctx.obj.get("instance_slug"),
-                    snapshot_slug=kwargs["snapshot"],
-                )
-            else:
-                raise ClickException(
-                    "Please specify an instance slug with the --instance argument"
-                )
-        else:
-            raise ClickException(
-                "Please specify a space slug with the --space argument"
-            )
-    else:
-        raise ClickException("Please specify an org slug with the --org argument")
+    snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    return list_apps(
+        org_slug=snapshot_ctx.get("org_slug"),
+        space_slug=snapshot_ctx.get("space_slug"),
+        instance_slug=snapshot_ctx.get("instance_slug"),
+        snapshot_slug=kwargs["snapshot"],
+    )
 
 
 @nv_apps.command("start")
@@ -327,16 +276,11 @@ def nv_apps_start(ctx, **kwargs):
     Starts the Nuvolos application with the given ID
     """
     check_api_key_configured()
+    snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
     res = start_app(
-        org_slug=kwargs["org"]
-        if kwargs.get("org") is not None
-        else ctx.obj.get("org_slug"),
-        space_slug=kwargs["space"]
-        if kwargs.get("space") is not None
-        else ctx.obj.get("space_slug"),
-        instance_slug=kwargs["instance"]
-        if kwargs.get("instance") is not None
-        else ctx.obj.get("instance_slug"),
+        org_slug=snapshot_ctx.get("org_slug"),
+        space_slug=snapshot_ctx.get("space_slug"),
+        instance_slug=snapshot_ctx.get("instance_slug"),
         app_slug=kwargs.get("app"),
         node_pool=kwargs.get("node_pool"),
     )
@@ -375,16 +319,11 @@ def nv_apps_stop(ctx, **kwargs):
     Stops the Nuvolos application with the given ID
     """
     check_api_key_configured()
+    snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
     res = stop_app(
-        org_slug=kwargs["org"]
-        if kwargs.get("org") is not None
-        else ctx.obj.get("org_slug"),
-        space_slug=kwargs["space"]
-        if kwargs.get("space") is not None
-        else ctx.obj.get("space_slug"),
-        instance_slug=kwargs["instance"]
-        if kwargs.get("instance") is not None
-        else ctx.obj.get("instance_slug"),
+        org_slug=snapshot_ctx.get("org_slug"),
+        space_slug=snapshot_ctx.get("space_slug"),
+        instance_slug=snapshot_ctx.get("instance_slug"),
         app_slug=kwargs.get("app"),
     )
 
