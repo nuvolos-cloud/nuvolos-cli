@@ -22,7 +22,9 @@ jobs:
         run: |
           echo "Installing twine"
           pip install twine
+          echo "Installing build"
+          pip install build
           echo "Building package"
-          python setup.py sdist
+          python -m build
           echo "Uploading package"
           twine upload -u __token__ -p ${{ secrets.PYPI_TOKEN }} dist/*
