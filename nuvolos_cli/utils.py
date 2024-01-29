@@ -1,4 +1,6 @@
 import click
+from click import ClickException
+from copy import deepcopy
 from functools import wraps
 from pydantic import BaseModel
 from tabulate import tabulate
@@ -37,3 +39,82 @@ def format_response(f):
             raise click.ClickException(f"{format_} is not a valid format option")
 
     return wrapper
+
+
+def get_effective_space_context(ctx, **kwargs):
+    org_slug = kwargs.get("org", None)
+
+    ret_ctx = deepcopy(ctx.obj)
+    if org_slug:
+        ret_ctx["org_slug"] = org_slug
+    else:
+        if not ret_ctx:
+            raise ClickException("Please specify an org slug with the --org argument")
+
+    return filter_context_dict(ret_ctx, ["org_slug"])
+
+
+def get_effective_instance_context(ctx, **kwargs):
+    org_slug = kwargs.get("org", None)
+    space_slug = kwargs.get("space", None)
+
+    ret_ctx = deepcopy(ctx.obj)
+    if org_slug:
+        if not space_slug:
+            raise ClickException(
+                "Please specify a space slug with the --space argument"
+            )
+        else:
+            ret_ctx["org_slug"] = org_slug
+            ret_ctx["space_slug"] = space_slug
+    elif space_slug:
+        ret_ctx["space_slug"] = space_slug
+    else:
+        if not ret_ctx:
+            raise ClickException(
+                "Missing instance context. Please specify the context with the --org, --space arguments"
+            )
+    return filter_context_dict(ret_ctx, ["org_slug", "space_slug"])
+
+
+def get_effective_snapshot_context(ctx, **kwargs):
+    org_slug = kwargs.get("org", None)
+    space_slug = kwargs.get("space", None)
+    instance_slug = kwargs.get("instance", None)
+
+    ret_ctx = deepcopy(ctx.obj)
+
+    if org_slug:
+        if not space_slug:
+            raise ClickException(
+                "Please specify a space slug with the --space argument"
+            )
+        elif not instance_slug:
+            raise ClickException(
+                "Please specify a instance slug with the --instance argument"
+            )
+        else:
+            ret_ctx["org_slug"] = org_slug
+            ret_ctx["space_slug"] = space_slug
+            ret_ctx["instance_slug"] = instance_slug
+    elif space_slug:
+        if not instance_slug:
+            raise ClickException(
+                "Please specify a instance slug with the --instance argument"
+            )
+        else:
+            ret_ctx["space_slug"] = space_slug
+            ret_ctx["instance_slug"] = instance_slug
+    elif instance_slug:
+        ret_ctx["instance_slug"] = instance_slug
+    else:
+        if not ret_ctx:
+            raise ClickException(
+                "Missing application context. Please specify the context with the --org, --space, --instance arguments"
+            )
+
+    return ret_ctx
+
+
+def filter_context_dict(d: dict, keep=[]):
+    return {arg: value for arg, value in d.items() if arg in keep}
