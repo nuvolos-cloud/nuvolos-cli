@@ -40,6 +40,11 @@ You can stop an application with the `nuvolos apps stop` command:
 nuvolos apps stop -a <app_slug>
 ```
 
+You can execute custom commands in a Nuvolos application with the `nuvolos apps execute` command:
+```
+nuvolos apps execute -a <app_slug> -c <command>
+```
+
 ## Using the CLI on your own computer
 
 ### Listing Nuvolos organizations
@@ -113,3 +118,11 @@ nuvolos apps stop -o <org_slug> -s <space_slug> -i <instance_slug> -a <app_slug>
 ```
 
 where `<org_slug>` is the organization slug, `<space_slug>` is the space slug, `<instance_slug>` is the instance slug, and `<app_slug>` is the application slug.
+
+### Executing commands in a Nuvolos application
+
+To execute a command in a running Nuvolos application, you can use the `nuvolos apps execute` command:
+```
+nuvolos apps execute -o <org_slug> -s <space_slug> -i <instance_slug> -a <app_slug> -c <command>
+```
+where `<org_slug>` is the organization slug, `<space_slug>` is the space slug, `<instance_slug>` is the instance slug, and `<app_slug>` is the application slug and the `<command>` is the command to execute. For further details check [Execute commands](execute_commands.md).

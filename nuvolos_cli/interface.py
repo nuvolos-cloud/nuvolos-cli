@@ -15,6 +15,7 @@ from .api_client import (
     list_all_running_apps,
     start_app,
     stop_app,
+    execute_command_in_app,
 )
 from .utils import format_response
 
@@ -405,6 +406,63 @@ def nv_apps_running(**kwargs):
     """
     check_api_key_configured()
     res = list_all_running_apps()
+    return res
+
+
+@nv_apps.command("execute")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization to use to list applications",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space to use to list applications",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The slug of the Nuvolos instance to use to list applications",
+)
+@click.option(
+    "-a",
+    "--app",
+    type=str,
+    help="The slug of the Nuvolos application to start",
+    required=True,
+)
+@click.option(
+    "-c",
+    "--command",
+    type=str,
+    help="The command to run in a Nuvolos application",
+    required=True,
+)
+@click.pass_context
+@format_response
+def nv_apps_execute(ctx, **kwargs):
+    """
+    Executes a command in a Nuvolos application.
+    """
+    check_api_key_configured()
+    res = execute_command_in_app(
+        org_slug=kwargs["org"]
+        if kwargs.get("org") is not None
+        else ctx.obj.get("org_slug"),
+        space_slug=kwargs["space"]
+        if kwargs.get("space") is not None
+        else ctx.obj.get("space_slug"),
+        instance_slug=kwargs["instance"]
+        if kwargs.get("instance") is not None
+        else ctx.obj.get("instance_slug"),
+        app_slug=kwargs.get("app"),
+        command=kwargs.get("command"),
+    )
+
     return res
 
 

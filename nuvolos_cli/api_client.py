@@ -4,7 +4,7 @@ from .logging import clog
 from .config import get_api_config
 
 import nuvolos_client_api
-from nuvolos_client_api.models import StartApp
+from nuvolos_client_api.models import StartApp, ExecuteCommand
 
 
 def _find_variables(tb, variables):
@@ -179,4 +179,25 @@ def stop_app(org_slug: str, space_slug: str, instance_slug: str, app_slug: str):
             raise NuvolosCliException.from_api_exception(
                 e,
                 f"Exception when stopping Nuvolos app [{app_slug}]: {e}",
+            )
+
+
+def execute_command_in_app(
+    org_slug: str, space_slug: str, instance_slug: str, app_slug: str, command: str
+):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.WorkloadsV1Api(api_client)
+        try:
+            return api_instance.execute_command(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                app_slug=app_slug,
+                body=ExecuteCommand.from_dict({"command": command}),
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when running command {command} in Nuvolos app [{app_slug}]: {e}",
             )

@@ -4,9 +4,11 @@ nav:
   - Home: index.md
   - Installation: install.md
   - Quickstart: quickstart.md
+  - Execute commands: execute_commands.md
   - Command reference: commands.md
 
 
 markdown_extensions:
   - mkdocs-click
   - attr_list
+  - admonition
