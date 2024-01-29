@@ -1,2 +1,3 @@
-__version__ = "0.0.2"
-__nuvolos_client_api_version__ = "0.0.2"
+from importlib.metadata import version
+
+__version__ = version("nuvolos_cli")

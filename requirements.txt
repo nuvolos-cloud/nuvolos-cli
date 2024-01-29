@@ -1,7 +1,0 @@
-click
-click-log
-pyyaml
-semver
-pytest
-tabulate
-Nuvolos-Client-API
