@@ -72,6 +72,7 @@ def get_config():
             raise ClickException(
                 "Nuvolos CLI is not configured, please set your API key with `nuvolos config --api-key`."
             )
+        return dc
 
 
 def get_api_config():

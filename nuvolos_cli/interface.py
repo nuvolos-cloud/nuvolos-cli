@@ -14,6 +14,8 @@ from .api_client import (
     list_all_running_apps,
     start_app,
     stop_app,
+    execute_command_in_app,
+    list_all_running_workloads_for_app,
 )
 from .utils import (
     format_response,
@@ -135,7 +137,7 @@ def nv_instances_list(ctx, **kwargs):
     check_api_key_configured()
     instance_ctx = get_effective_instance_context(ctx, **kwargs)
     return list_instances(
-        org_slug=instance_ctx.get("org_slug"), space_slug=instance_ctx.get("space_lug")
+        org_slug=instance_ctx.get("org_slug"), space_slug=instance_ctx.get("space_slug")
     )
 
 
@@ -332,18 +334,105 @@ def nv_apps_stop(ctx, **kwargs):
 
 @nv_apps.command("running")
 @click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization to use to list running workloads for an application",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space to use to list running workloads for an application",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The slug of the Nuvolos instance to use to list running workloads for an application",
+)
+@click.option(
+    "-a",
+    "--app",
+    type=str,
+    help="The slug of the Nuvolos application to use to list running an workloads",
+)
+@click.option(
     "--format",
     type=str,
     default="tabulated",
     help="Sets the output into the desired format",
 )
+@click.pass_context
 @format_response
-def nv_apps_running(**kwargs):
+def nv_apps_running(ctx, **kwargs):
     """
-    Lists all running Nuvolos applications of the user
+    Lists all running Nuvolos applications of the user. If the app is specified, lists all running workloads
+    for the given application.
     """
     check_api_key_configured()
-    res = list_all_running_apps()
+    app_slug = kwargs.get("app", None)
+    if app_slug:
+        snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+        res = list_all_running_workloads_for_app(
+            org_slug=snapshot_ctx.get("org_slug"),
+            space_slug=snapshot_ctx.get("space_slug"),
+            instance_slug=snapshot_ctx.get("instance_slug"),
+            app_slug=kwargs.get("app"),
+        )
+    else:
+        res = list_all_running_apps()
+    return res
+
+
+@nv_apps.command("execute")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization to use to execute a command in an application",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space to use to execute a command in an application",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The slug of the Nuvolos instance to use to execute a command in an application",
+)
+@click.option(
+    "-a",
+    "--app",
+    type=str,
+    help="The slug of the Nuvolos application where the command is executed",
+    required=True,
+)
+@click.option(
+    "-c",
+    "--command",
+    type=str,
+    help="The command to run in a Nuvolos application",
+    required=True,
+)
+@click.pass_context
+def nv_apps_execute(ctx, **kwargs):
+    """
+    Executes a command in a Nuvolos application.
+    """
+    check_api_key_configured()
+    snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    res = execute_command_in_app(
+        org_slug=snapshot_ctx.get("org_slug"),
+        space_slug=snapshot_ctx.get("space_slug"),
+        instance_slug=snapshot_ctx.get("instance_slug"),
+        app_slug=kwargs.get("app"),
+        command=kwargs.get("command"),
+    )
+
     return res
 
 
