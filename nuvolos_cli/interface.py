@@ -137,7 +137,7 @@ def nv_instances_list(ctx, **kwargs):
     check_api_key_configured()
     instance_ctx = get_effective_instance_context(ctx, **kwargs)
     return list_instances(
-        org_slug=instance_ctx.get("org_slug"), space_slug=instance_ctx.get("space_lug")
+        org_slug=instance_ctx.get("org_slug"), space_slug=instance_ctx.get("space_slug")
     )
 
 
@@ -419,7 +419,6 @@ def nv_apps_running(ctx, **kwargs):
     required=True,
 )
 @click.pass_context
-@format_response
 def nv_apps_execute(ctx, **kwargs):
     """
     Executes a command in a Nuvolos application.

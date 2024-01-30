@@ -164,6 +164,7 @@ def start_app(
                     instance_slug=instance_slug,
                     app_slug=app_slug,
                     body=StartApp.from_dict({"node_pool": node_pool}),
+                    _headers={"Content-Type": "application/json"},
                 )
                 clog.info(
                     f"App [{app_slug}] successfully started on node pool [{node_pool}]:\n{res}"
@@ -215,6 +216,7 @@ def execute_command_in_app(
                 instance_slug=instance_slug,
                 app_slug=app_slug,
                 body=ExecuteCommand.from_dict({"command": command}),
+                _headers={"Content-Type": "application/json"},
             )
         except nuvolos_client_api.ApiException as e:
             raise NuvolosCliException.from_api_exception(
