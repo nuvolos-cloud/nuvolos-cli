@@ -53,7 +53,7 @@ def default_global_configs():
 
 
 def get_global_dict_config():
-    return DictConfig(get_default_config_path(), default_global_configs())
+    return DictConfig(get_default_config_path(), default_global_configs)
 
 
 def get_config():
@@ -68,6 +68,7 @@ def get_config():
         host = from_variable("NUVOLOS_API_HOST")
         if host:
             dc["host"] = host
+
         if dc["api_key"] is None:
             raise ClickException(
                 "Nuvolos CLI is not configured, please set your API key with `nuvolos config --api-key`."
@@ -133,5 +134,5 @@ Space:\t\t{nuvolos_ctx['space_slug']}
 Instance:\t{nuvolos_ctx['instance_slug']}"""
         )
     clog.info(
-        f"\nThe Nuvolos CLI config ({get_default_config_path()}):\n{yaml.dump(gc)}"
+        f"\nThe Nuvolos CLI config ({get_default_config_path() if get_default_config_path().exists() else ''}):\n{yaml.dump(gc)}"
     )

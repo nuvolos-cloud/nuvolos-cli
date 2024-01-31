@@ -70,6 +70,7 @@ def nv_orgs_list(ctx, **kwargs):
     """
     Lists the Nuvolos organizations available to the current user
     """
+    check_api_key_configured()
     res = list_orgs()
     return res
 
