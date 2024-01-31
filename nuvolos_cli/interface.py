@@ -16,6 +16,7 @@ from .api_client import (
     stop_app,
     execute_command_in_app,
     list_all_running_workloads_for_app,
+    list_nodepools,
 )
 from .utils import (
     format_response,
@@ -432,6 +433,21 @@ def nv_apps_execute(ctx, **kwargs):
         app_slug=kwargs.get("app"),
         command=kwargs.get("command"),
     )
+
+    return res
+
+
+@nv_apps.command("nodes")
+@click.option(
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format",
+)
+@format_response
+def nv_apps_list_nodes(**kwargs):
+    check_api_key_configured()
+    res = list_nodepools()
 
     return res
 
