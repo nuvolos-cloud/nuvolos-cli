@@ -28,6 +28,8 @@ def format_response(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         res = f(*args, **kwargs)
+        if not isinstance(res, list):
+            res = [res]
         format_ = kwargs.get("format")
         if format_ == "tabulated":
             return print_models_tabulated(res)

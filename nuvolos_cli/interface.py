@@ -59,10 +59,11 @@ def nv_orgs(ctx):
 
 @nv_orgs.command("list")
 @click.option(
+    "-f",
     "--format",
     type=str,
     default="tabulated",
-    help="Sets the output into the desired format",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
 )
 @click.pass_context
 @format_response
@@ -89,10 +90,11 @@ def nv_spaces(ctx):
     help="The slug of the Nuvolos organization to use to list spaces",
 )
 @click.option(
+    "-f",
     "--format",
     type=str,
     default="tabulated",
-    help="Sets the output into the desired format",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
 )
 @click.pass_context
 @format_response
@@ -125,10 +127,11 @@ def nv_instances(ctx):
     help="The slug of the Nuvolos space to use to list instances",
 )
 @click.option(
+    "-f",
     "--format",
     type=str,
     default="tabulated",
-    help="Sets the output into the desired format",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
 )
 @click.pass_context
 @format_response
@@ -169,10 +172,11 @@ def nv_snapshots(ctx):
     help="The slug of the Nuvolos instance to use to list snapshots",
 )
 @click.option(
+    "-f",
     "--format",
     type=str,
     default="tabulated",
-    help="Sets the output into the desired format",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
 )
 @click.pass_context
 @format_response
@@ -221,10 +225,11 @@ def nv_apps():
     help="The slug of the Nuvolos snapshot to use to list applications",
 )
 @click.option(
+    "-f",
     "--format",
     type=str,
     default="tabulated",
-    help="Sets the output into the desired format",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
 )
 @click.pass_context
 @format_response
@@ -360,10 +365,11 @@ def nv_apps_stop(ctx, **kwargs):
     help="The slug of the Nuvolos application to use to list running an workloads",
 )
 @click.option(
+    "-f",
     "--format",
     type=str,
     default="tabulated",
-    help="Sets the output into the desired format",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
 )
 @click.pass_context
 @format_response
@@ -420,7 +426,15 @@ def nv_apps_running(ctx, **kwargs):
     help="The command to run in a Nuvolos application",
     required=True,
 )
+@click.option(
+    "-f",
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
+)
 @click.pass_context
+@format_response
 def nv_apps_execute(ctx, **kwargs):
     """
     Executes a command in a Nuvolos application.
@@ -434,16 +448,16 @@ def nv_apps_execute(ctx, **kwargs):
         app_slug=kwargs.get("app"),
         command=kwargs.get("command"),
     )
-
     return res
 
 
 @nv_apps.command("nodes")
 @click.option(
+    "-f",
     "--format",
     type=str,
     default="tabulated",
-    help="Sets the output into the desired format",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
 )
 @format_response
 def nv_apps_list_nodes(**kwargs):

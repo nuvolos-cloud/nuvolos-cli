@@ -29,7 +29,7 @@ nuvolos apps execute -a your_app_slug -c 'python your_file.py'
 The default working directory for command execution is the same as the interactive terminals in the selected applications, the `/files` folder.
 
 ## Storing metadata about the submitted commands
-Upon every command execution a new folder is created under the `/files/nuvolos_api_out` folder in a `<timestamp>_<request_id>` format,
+Upon every command execution a new folder is created in selected application's instance under the `/files/nuvolos_api_out` folder in a `<timestamp>_<request_id>` format,
 where the request id (`reqid`) is returned by the cli command. A `metadata.json` file is created to store details 
 such as the application context, submission timestamp, and the submitted command.
 
