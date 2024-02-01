@@ -23,10 +23,12 @@ nuvolos apps list
 To launch an application, you can use the `nuvolos apps start` command:
 
 ```
-nuvolos apps start -a <app_slug>
+nuvolos apps start -a <app_slug> -n <node_pool>
 ```
-where `<app_slug>` is the application slug. 
+where `<app_slug>` is the application slug.
 You can find the application slug in the output of the `nuvolos apps list` command.
+The `-n` argument is an optional parameter to set the node pool where the 
+application should run. For further reference see [Launching scaled apps](launch_scaled_apps.md).
 
 You can list all running apps with the `nuvolos apps command`:
 
@@ -102,10 +104,11 @@ where `<org_slug>` is the organization slug, `<space_slug>` is the space slug, `
 To launch a Nuvolos application in a chosen snapshot, you can use the `nuvolos apps start` command:
 
 ```
-nuvolos apps start -o <org_slug> -s <space_slug> -i <instance_slug> -a <app_slug>
+nuvolos apps start -o <org_slug> -s <space_slug> -i <instance_slug> -a <app_slug> -n <node_pool>
 ```
 
 where `<org_slug>` is the organization slug, `<space_slug>` is the space slug, `<instance_slug>` is the instance slug, and `<app_slug>` is the application slug.
+The `-n` argument is an optional parameter to set the node pool where the application should run. For further reference see [Launching scaled apps](launch_scaled_apps.md).
 
 **Note that you can only start Nuvolos applications in the development snapshot.**
 
@@ -125,4 +128,5 @@ To execute a command in a running Nuvolos application, you can use the `nuvolos 
 ```
 nuvolos apps execute -o <org_slug> -s <space_slug> -i <instance_slug> -a <app_slug> -c <command>
 ```
-where `<org_slug>` is the organization slug, `<space_slug>` is the space slug, `<instance_slug>` is the instance slug, and `<app_slug>` is the application slug and the `<command>` is the command to execute. For further details check [Execute commands](execute_commands.md).
+where `<org_slug>` is the organization slug, `<space_slug>` is the space slug, `<instance_slug>` is the instance slug, 
+`<app_slug>` is the application slug and `<command>` is the command to execute. For further details see [Execute commands](execute_commands.md).

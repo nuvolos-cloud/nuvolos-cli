@@ -119,10 +119,11 @@ where `<org_slug>` is the organization slug, `<space_slug>` is the space slug, `
 To launch a Nuvolos application in a chosen snapshot, you can use the `nuvolos apps start` command:
 
 ```
-nuvolos apps start -o <org_slug> -s <space_slug> -i <instance_slug> -a <app_slug>
+nuvolos apps start -o <org_slug> -s <space_slug> -i <instance_slug> -a <app_slug> -n <node_pool>
 ```
 
 where `<org_slug>` is the organization slug, `<space_slug>` is the space slug, `<instance_slug>` is the instance slug, and `<app_slug>` is the application slug.
+The `-n` argument is an optional parameter to set the node pool where the application should run.
 
 **Note that you can only start Nuvolos applications in the development snapshot.**
 
@@ -136,5 +137,13 @@ nuvolos apps stop -o <org_slug> -s <space_slug> -i <instance_slug> -a <app_slug>
 
 where `<org_slug>` is the organization slug, `<space_slug>` is the space slug, `<instance_slug>` is the instance slug, and `<app_slug>` is the application slug.
 
+### Executing commands in a Nuvolos application
+
+To execute a command in a running Nuvolos application, you can use the `nuvolos apps execute` command:
+```
+nuvolos apps execute -o <org_slug> -s <space_slug> -i <instance_slug> -a <app_slug> -c <command>
+```
+where `<org_slug>` is the organization slug, `<space_slug>` is the space slug, `<instance_slug>` is the instance slug, `<app_slug>` 
+is the application slug and `<command>` is the command to execute.
 
 

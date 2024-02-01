@@ -157,7 +157,7 @@ def start_app(
     with nuvolos_client_api.ApiClient(config) as api_client:
         api_instance = nuvolos_client_api.WorkloadsV1Api(api_client)
         try:
-            if node_pool:
+            if node_pool is not None:
                 res = api_instance.create_workload(
                     org_slug=org_slug,
                     space_slug=space_slug,
@@ -222,4 +222,17 @@ def execute_command_in_app(
             raise NuvolosCliException.from_api_exception(
                 e,
                 f"Exception when running command {command} in Nuvolos app [{app_slug}]: {e}",
+            )
+
+
+def list_nodepools():
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.WorkloadsV1Api(api_client)
+        try:
+            return api_instance.get_nodepools()
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when listing nodepools: {e}",
             )
