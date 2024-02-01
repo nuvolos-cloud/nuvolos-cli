@@ -291,7 +291,7 @@ def nv_apps_start(ctx, **kwargs):
         space_slug=snapshot_ctx.get("space_slug"),
         instance_slug=snapshot_ctx.get("instance_slug"),
         app_slug=kwargs.get("app"),
-        node_pool=kwargs.get("node_pool"),
+        node_pool=kwargs.get("node_pool", None),
     )
     return res
 

@@ -157,7 +157,7 @@ def start_app(
     with nuvolos_client_api.ApiClient(config) as api_client:
         api_instance = nuvolos_client_api.WorkloadsV1Api(api_client)
         try:
-            if node_pool:
+            if node_pool is not None:
                 res = api_instance.create_workload(
                     org_slug=org_slug,
                     space_slug=space_slug,
