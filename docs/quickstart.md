@@ -30,7 +30,7 @@ You can find the application slug in the output of the `nuvolos apps list` comma
 The `-n` argument is an optional parameter to set the node pool where the 
 application should run. For further reference see [Launching scaled apps](launch_scaled_apps.md).
 
-You can list all running apps with the `nuvolos apps command`:
+You can list all running apps with the `nuvolos apps running` command:
 
 ```
 nuvolos apps running
@@ -44,7 +44,7 @@ nuvolos apps stop -a <app_slug>
 
 You can execute custom commands in a Nuvolos application with the `nuvolos apps execute` command:
 ```
-nuvolos apps execute -a <app_slug> -c <command>
+nuvolos apps execute -a <app_slug> COMMAND
 ```
 
 ## Using the CLI on your own computer
@@ -126,7 +126,7 @@ where `<org_slug>` is the organization slug, `<space_slug>` is the space slug, `
 
 To execute a command in a running Nuvolos application, you can use the `nuvolos apps execute` command:
 ```
-nuvolos apps execute -o <org_slug> -s <space_slug> -i <instance_slug> -a <app_slug> -c <command>
+nuvolos apps execute -o <org_slug> -s <space_slug> -i <instance_slug> -a <app_slug> COMMAND
 ```
 where `<org_slug>` is the organization slug, `<space_slug>` is the space slug, `<instance_slug>` is the instance slug, 
 `<app_slug>` is the application slug and `<command>` is the command to execute. For further details see [Execute commands](execute_commands.md).

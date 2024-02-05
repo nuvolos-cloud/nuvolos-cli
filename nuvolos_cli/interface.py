@@ -3,7 +3,7 @@ import json
 import click
 import click_log
 
-from .logging import clog
+
 from .config import init_cli_config, check_api_key_configured, info
 from .api_client import (
     list_orgs,
@@ -104,6 +104,7 @@ def nv_spaces_list(ctx, **kwargs):
     """
     check_api_key_configured()
     space_ctx = get_effective_space_context(ctx, **kwargs)
+    clog.debug(f"Running with context: {space_ctx}")
     return list_spaces(org_slug=space_ctx.get("org_slug"))
 
 
@@ -141,6 +142,7 @@ def nv_instances_list(ctx, **kwargs):
     """
     check_api_key_configured()
     instance_ctx = get_effective_instance_context(ctx, **kwargs)
+    clog.debug(f"Running with context: {instance_ctx}")
     return list_instances(
         org_slug=instance_ctx.get("org_slug"), space_slug=instance_ctx.get("space_slug")
     )
@@ -186,6 +188,7 @@ def nv_snapshots_list(ctx, **kwargs):
     """
     check_api_key_configured()
     snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    clog.debug(f"Running with context: {snapshot_ctx}")
     return list_snapshots(
         org_slug=snapshot_ctx.get("org_slug"),
         space_slug=snapshot_ctx.get("space_slug"),
@@ -239,6 +242,7 @@ def nv_apps_list(ctx, **kwargs):
     """
     check_api_key_configured()
     snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    clog.debug(f"Running with context: {snapshot_ctx}")
     return list_apps(
         org_slug=snapshot_ctx.get("org_slug"),
         space_slug=snapshot_ctx.get("space_slug"),
@@ -266,13 +270,7 @@ def nv_apps_list(ctx, **kwargs):
     type=str,
     help="The slug of the Nuvolos instance to use to start an application",
 )
-@click.option(
-    "-a",
-    "--app",
-    type=str,
-    help="The slug of the Nuvolos application to start",
-    required=True,
-)
+@click.argument("app")
 @click.option(
     "-n",
     "--node-pool",
@@ -280,17 +278,18 @@ def nv_apps_list(ctx, **kwargs):
     help="The node pool to use to run the app",
 )
 @click.pass_context
-def nv_apps_start(ctx, **kwargs):
+def nv_apps_start(ctx, app, **kwargs):
     """
     Starts the Nuvolos application with the given ID
     """
     check_api_key_configured()
     snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    clog.debug(f"Running with context: {snapshot_ctx}")
     res = start_app(
         org_slug=snapshot_ctx.get("org_slug"),
         space_slug=snapshot_ctx.get("space_slug"),
         instance_slug=snapshot_ctx.get("instance_slug"),
-        app_slug=kwargs.get("app"),
+        app_slug=app,
         node_pool=kwargs.get("node_pool", None),
     )
     return res
@@ -329,6 +328,7 @@ def nv_apps_stop(ctx, **kwargs):
     """
     check_api_key_configured()
     snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    clog.debug(f"Running with context: {snapshot_ctx}")
     res = stop_app(
         org_slug=snapshot_ctx.get("org_slug"),
         space_slug=snapshot_ctx.get("space_slug"),
@@ -382,6 +382,7 @@ def nv_apps_running(ctx, **kwargs):
     app_slug = kwargs.get("app", None)
     if app_slug:
         snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+        clog.debug(f"Running with context: {snapshot_ctx}")
         res = list_all_running_workloads_for_app(
             org_slug=snapshot_ctx.get("org_slug"),
             space_slug=snapshot_ctx.get("space_slug"),
@@ -419,13 +420,7 @@ def nv_apps_running(ctx, **kwargs):
     help="The slug of the Nuvolos application where the command is executed",
     required=True,
 )
-@click.option(
-    "-c",
-    "--command",
-    type=str,
-    help="The command to run in a Nuvolos application",
-    required=True,
-)
+@click.argument("command")
 @click.option(
     "-f",
     "--format",
@@ -435,23 +430,24 @@ def nv_apps_running(ctx, **kwargs):
 )
 @click.pass_context
 @format_response
-def nv_apps_execute(ctx, **kwargs):
+def nv_apps_execute(ctx, command, **kwargs):
     """
     Executes a command in a Nuvolos application.
     """
     check_api_key_configured()
     snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    clog.debug(f"Running with context: {snapshot_ctx}")
     res = execute_command_in_app(
         org_slug=snapshot_ctx.get("org_slug"),
         space_slug=snapshot_ctx.get("space_slug"),
         instance_slug=snapshot_ctx.get("instance_slug"),
         app_slug=kwargs.get("app"),
-        command=kwargs.get("command"),
+        command=command,
     )
     return res
 
 
-@nv_apps.command("nodes")
+@nv_apps.command("nodepools")
 @click.option(
     "-f",
     "--format",
@@ -460,7 +456,7 @@ def nv_apps_execute(ctx, **kwargs):
     help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
 )
 @format_response
-def nv_apps_list_nodes(**kwargs):
+def nv_apps_list_nodepools(**kwargs):
     check_api_key_configured()
     res = list_nodepools()
 
