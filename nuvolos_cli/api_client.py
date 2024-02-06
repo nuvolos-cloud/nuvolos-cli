@@ -192,7 +192,7 @@ def wait_for_app_running(
     running = False
     start = datetime.utcnow()
     stopped_timeout_secs = 30
-    staring_timeout_secs = from_variable("app_start_timeout_secs", 600)
+    staring_timeout_secs = int(from_variable("APP_START_TIMEOUT_SECS", 600))
     while not running:
         workloads = list_all_running_workloads_for_app(
             org_slug=org_slug,
