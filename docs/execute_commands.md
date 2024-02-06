@@ -7,9 +7,9 @@ nuvolos apps execute -o <org_slug> -s <space_slug> -i <instance_slug> -a <app_sl
 
 ## Selecting the application for command execution
 You can select the application where you intend to execute the command by providing the `app_slug` for the `-a` or `--app` 
-argument, while application context can be provided the `-o`, `-s`, `-i` arguments.
+option, while application context can be provided the `-o`, `-s`, `-i` options.
 
-On Nuvolos, you can omit the `-o`, `-s`, `-i` arguments if your target application is running in the same instance.
+On Nuvolos, you can omit the `-o`, `-s`, `-i` options if your target application is running in the same instance.
 However, if you'd like to submit a command to an application that is running in a separate instance, you need to specify the context for that application.
 
 Commands can only be run in a Nuvolos application that is in a RUNNING state. To understand how to verify that your application is running, 
