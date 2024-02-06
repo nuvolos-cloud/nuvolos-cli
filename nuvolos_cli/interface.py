@@ -299,7 +299,7 @@ def nv_apps_start(ctx, app, **kwargs):
             org_slug=snapshot_ctx.get("org_slug"),
             space_slug=snapshot_ctx.get("space_slug"),
             instance_slug=snapshot_ctx.get("instance_slug"),
-            app_slug=kwargs.get("app"),
+            app_slug=app,
         )
 
     return res

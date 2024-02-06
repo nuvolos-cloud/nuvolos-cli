@@ -1,9 +1,9 @@
-import yaml
 from click import ClickException
-
+from datetime import datetime
 from time import sleep
 from .logging import clog
-from .config import get_api_config
+from .config import get_api_config, from_variable
+from .utils import exit_on_timeout
 
 import nuvolos_client_api
 from nuvolos_client_api.models import StartApp, ExecuteCommand
@@ -190,6 +190,9 @@ def wait_for_app_running(
     org_slug: str, space_slug: str, instance_slug: str, app_slug: str
 ):
     running = False
+    start = datetime.utcnow()
+    stopped_timeout_secs = 30
+    staring_timeout_secs = from_variable("app_start_timeout_secs", 600)
     while not running:
         workloads = list_all_running_workloads_for_app(
             org_slug=org_slug,
@@ -198,12 +201,22 @@ def wait_for_app_running(
             app_slug=app_slug,
         )
         if len(workloads) == 0:
-            sleep(1)
+            exit_on_timeout(
+                start,
+                timeout_secs=stopped_timeout_secs,
+                err=f"No workload is available for app [{app_slug}] after {stopped_timeout_secs} seconds",
+            )
+            sleep(5)
         else:
             if workloads[0].status == "RUNNING":
                 running = True
             else:
-                sleep(1)
+                exit_on_timeout(
+                    start,
+                    timeout_secs=staring_timeout_secs,
+                    err=f"Application [{app_slug}] is still in STARTING state after {staring_timeout_secs} seconds",
+                )
+                sleep(5)
     clog.info(f"App [{app_slug}] is successfully started and running.")
 
 
