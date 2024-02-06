@@ -5,6 +5,7 @@ import pathlib
 from click import ClickException
 
 from .logging import clog
+from .utils import mask_api_key_in_config
 from .version import __version__
 
 import nuvolos_client_api
@@ -125,7 +126,7 @@ def info(nuvolos_ctx=None):
 """
     )
     clog.info(f"Version: {__version__}")
-    gc = get_config()
+    gc = mask_api_key_in_config(get_config())
     if nuvolos_ctx:
         clog.info(
             f"""\nThe Nuvolos CLI context:

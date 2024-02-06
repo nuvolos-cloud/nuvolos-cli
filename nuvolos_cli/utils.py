@@ -120,3 +120,13 @@ def get_effective_snapshot_context(ctx, **kwargs):
 
 def filter_context_dict(d: dict, keep=[]):
     return {arg: value for arg, value in d.items() if arg in keep}
+
+
+def mask_string(string: str, show: int = 4):
+    return (len(string) - show) * "*" + string[-show:]
+
+
+def mask_api_key_in_config(config: dict):
+    if config.get("api_key"):
+        config["api_key"] = mask_string(config["api_key"])
+    return config

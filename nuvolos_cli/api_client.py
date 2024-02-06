@@ -1,5 +1,7 @@
+import yaml
 from click import ClickException
 
+from time import sleep
 from .logging import clog
 from .config import get_api_config
 
@@ -182,6 +184,28 @@ def start_app(
                 e,
                 f"Exception when starting Nuvolos app [{app_slug}]: {e}",
             )
+
+
+def wait_for_app_running(
+    org_slug: str, space_slug: str, instance_slug: str, app_slug: str
+):
+    running = False
+    while not running:
+        workloads = list_all_running_workloads_for_app(
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=instance_slug,
+            app_slug=app_slug,
+        )
+        if len(workloads) == 0:
+            sleep(1)
+        else:
+            if workloads[0].status == "RUNNING":
+                running = True
+            else:
+                sleep(1)
+
+    clog.info(f"App [{app_slug}] is successfully started and running:\n{yaml.dump(workloads[0])}")
 
 
 def stop_app(org_slug: str, space_slug: str, instance_slug: str, app_slug: str):
