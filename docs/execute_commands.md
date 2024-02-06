@@ -2,7 +2,7 @@
 
 With the nuvolos API you can execute commands in your running Nuvolos applications with the `nuvolos apps execute` command:
 ```
-nuvolos apps execute -o <org_slug> -s <space_slug> -i <instance_slug> -a <app_slug> -c <command>
+nuvolos apps execute -o <org_slug> -s <space_slug> -i <instance_slug> -a <app_slug> COMMAND
 ```
 
 ## Selecting the application for command execution
@@ -23,7 +23,7 @@ You can submit multiple commands to a running Nuvolos application by making mult
 The command execution mirrors the behavior of the terminal in your Nuvolos application when accessed through the UI.
 For example, you can run `.py` files in a JupyterLab application by calling 
 ```
-nuvolos apps execute -a your_app_slug -c 'python your_file.py'
+nuvolos apps execute -a your_app_slug 'python your_file.py'
 ```
 
 The default working directory for command execution is the same as the interactive terminals in the selected applications, the `/files` folder.

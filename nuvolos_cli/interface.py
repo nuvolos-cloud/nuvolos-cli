@@ -267,13 +267,7 @@ def nv_apps_list(ctx, **kwargs):
     type=str,
     help="The slug of the Nuvolos instance to use to start an application",
 )
-@click.option(
-    "-a",
-    "--app",
-    type=str,
-    help="The slug of the Nuvolos application to start",
-    required=True,
-)
+@click.argument("app")
 @click.option(
     "-n",
     "--node-pool",
@@ -287,9 +281,9 @@ def nv_apps_list(ctx, **kwargs):
     help="Waits until the started application is in a running state",
 )
 @click.pass_context
-def nv_apps_start(ctx, **kwargs):
+def nv_apps_start(ctx, app, **kwargs):
     """
-    Starts the Nuvolos application with the given ID
+    Starts the Nuvolos application with the APP application slug
     """
     check_api_key_configured()
     snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
@@ -297,7 +291,7 @@ def nv_apps_start(ctx, **kwargs):
         org_slug=snapshot_ctx.get("org_slug"),
         space_slug=snapshot_ctx.get("space_slug"),
         instance_slug=snapshot_ctx.get("instance_slug"),
-        app_slug=kwargs.get("app"),
+        app_slug=app,
         node_pool=kwargs.get("node_pool", None),
     )
     if kwargs.get("wait"):
@@ -340,7 +334,7 @@ def nv_apps_start(ctx, **kwargs):
 @click.pass_context
 def nv_apps_stop(ctx, **kwargs):
     """
-    Stops the Nuvolos application with the given ID
+    Stops the Nuvolos application with the given application slug
     """
     check_api_key_configured()
     snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
@@ -434,13 +428,7 @@ def nv_apps_running(ctx, **kwargs):
     help="The slug of the Nuvolos application where the command is executed",
     required=True,
 )
-@click.option(
-    "-c",
-    "--command",
-    type=str,
-    help="The command to run in a Nuvolos application",
-    required=True,
-)
+@click.argument("command")
 @click.option(
     "-f",
     "--format",
@@ -450,9 +438,12 @@ def nv_apps_running(ctx, **kwargs):
 )
 @click.pass_context
 @format_response
-def nv_apps_execute(ctx, **kwargs):
+def nv_apps_execute(ctx, command, **kwargs):
     """
-    Executes a command in a Nuvolos application.
+    Executes COMMAND in a Nuvolos application.
+
+    Example: 
+    nuvolos apps execute -a my_slug "python -c 'from time import sleep;sleep(10)'"
     """
     check_api_key_configured()
     snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
@@ -461,12 +452,12 @@ def nv_apps_execute(ctx, **kwargs):
         space_slug=snapshot_ctx.get("space_slug"),
         instance_slug=snapshot_ctx.get("instance_slug"),
         app_slug=kwargs.get("app"),
-        command=kwargs.get("command"),
+        command=command,
     )
     return res
 
 
-@nv_apps.command("nodes")
+@nv_apps.command("nodepools")
 @click.option(
     "-f",
     "--format",
@@ -475,7 +466,7 @@ def nv_apps_execute(ctx, **kwargs):
     help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
 )
 @format_response
-def nv_apps_list_nodes(**kwargs):
+def nv_apps_list_nodepools(**kwargs):
     check_api_key_configured()
     res = list_nodepools()
 

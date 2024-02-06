@@ -46,7 +46,6 @@ def from_variable(variable_name, default=None):
 
 def default_global_configs():
     return {
-        "app_name": "nuvolos-cli",
         "nuvolos_cli_version": __version__,
         "api_key": from_variable("NUVOLOS_API_KEY"),
         "host": from_variable("NUVOLOS_API_HOST", "https://api.nuvolos.cloud"),
@@ -130,9 +129,9 @@ def info(nuvolos_ctx=None):
     if nuvolos_ctx:
         clog.info(
             f"""\nThe Nuvolos CLI context:
-Organization:\t{nuvolos_ctx['org_slug']}
-Space:\t\t{nuvolos_ctx['space_slug']}
-Instance:\t{nuvolos_ctx['instance_slug']}"""
+Organization slug:\t{nuvolos_ctx['org_slug']}
+Space slug:\t\t{nuvolos_ctx['space_slug']}
+Instance slug:\t\t{nuvolos_ctx['instance_slug']}"""
         )
     clog.info(
         f"\nThe Nuvolos CLI config ({get_default_config_path() if get_default_config_path().exists() else ''}):\n{yaml.dump(gc)}"

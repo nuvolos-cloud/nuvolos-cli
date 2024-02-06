@@ -1,5 +1,6 @@
 import click
 from click import ClickException
+from .logging import clog
 from copy import deepcopy
 from functools import wraps
 from pydantic import BaseModel
@@ -53,7 +54,9 @@ def get_effective_space_context(ctx, **kwargs):
         if not ret_ctx:
             raise ClickException("Please specify an org slug with the --org argument")
 
-    return filter_context_dict(ret_ctx, ["org_slug"])
+    ret_ctx = filter_context_dict(ret_ctx, ["org_slug"])
+    clog.debug(f"Running with context: {ret_ctx}")
+    return ret_ctx
 
 
 def get_effective_instance_context(ctx, **kwargs):
@@ -76,7 +79,9 @@ def get_effective_instance_context(ctx, **kwargs):
             raise ClickException(
                 "Missing instance context. Please specify the context with the --org, --space arguments"
             )
-    return filter_context_dict(ret_ctx, ["org_slug", "space_slug"])
+    ret_ctx = filter_context_dict(ret_ctx, ["org_slug", "space_slug"])
+    clog.debug(f"Running with context: {ret_ctx}")
+    return ret_ctx
 
 
 def get_effective_snapshot_context(ctx, **kwargs):
@@ -115,6 +120,7 @@ def get_effective_snapshot_context(ctx, **kwargs):
                 "Missing application context. Please specify the context with the --org, --space, --instance arguments"
             )
 
+    clog.debug(f"Running with context: {ret_ctx}")
     return ret_ctx
 
 
