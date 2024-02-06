@@ -281,9 +281,9 @@ def nv_apps_list(ctx, **kwargs):
     help="The node pool to use to run the app",
 )
 @click.option(
+    "-w",
     "--wait",
-    type=str,
-    default=False,
+    is_flag=True,
     help="Waits until the started application is in a running state",
 )
 @click.pass_context
@@ -301,14 +301,14 @@ def nv_apps_start(ctx, **kwargs):
         node_pool=kwargs.get("node_pool", None),
     )
     if kwargs.get("wait"):
-        return wait_for_app_running(
+        res = wait_for_app_running(
             org_slug=snapshot_ctx.get("org_slug"),
             space_slug=snapshot_ctx.get("space_slug"),
             instance_slug=snapshot_ctx.get("instance_slug"),
             app_slug=kwargs.get("app"),
         )
-    else:
-        return res
+
+    return res
 
 
 @nv_apps.command("stop")

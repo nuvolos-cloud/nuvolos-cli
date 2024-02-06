@@ -204,8 +204,7 @@ def wait_for_app_running(
                 running = True
             else:
                 sleep(1)
-
-    clog.info(f"App [{app_slug}] is successfully started and running:\n{yaml.dump(workloads[0])}")
+    clog.info(f"App [{app_slug}] is successfully started and running.")
 
 
 def stop_app(org_slug: str, space_slug: str, instance_slug: str, app_slug: str):
