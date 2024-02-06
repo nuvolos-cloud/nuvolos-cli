@@ -23,9 +23,9 @@ nuvolos apps list
 To launch an application, you can use the `nuvolos apps start` command:
 
 ```
-nuvolos apps start -a <app_slug> -n <node_pool>
+nuvolos apps start -n <node_pool> APP
 ```
-where `<app_slug>` is the application slug.
+where `APP` is the application slug.
 You can find the application slug in the output of the `nuvolos apps list` command.
 The `-n` argument is an optional parameter to set the node pool where the 
 application should run. For further reference see [Launching scaled apps](launch_scaled_apps.md).
@@ -104,10 +104,10 @@ where `<org_slug>` is the organization slug, `<space_slug>` is the space slug, `
 To launch a Nuvolos application in a chosen snapshot, you can use the `nuvolos apps start` command:
 
 ```
-nuvolos apps start -o <org_slug> -s <space_slug> -i <instance_slug> -a <app_slug> -n <node_pool>
+nuvolos apps start -o <org_slug> -s <space_slug> -i <instance_slug> -n <node_pool> APP
 ```
 
-where `<org_slug>` is the organization slug, `<space_slug>` is the space slug, `<instance_slug>` is the instance slug, and `<app_slug>` is the application slug.
+where `<org_slug>` is the organization slug, `<space_slug>` is the space slug, `<instance_slug>` is the instance slug, and `APP` is the application slug.
 The `-n` argument is an optional parameter to set the node pool where the application should run. For further reference see [Launching scaled apps](launch_scaled_apps.md).
 
 **Note that you can only start Nuvolos applications in the development snapshot.**
