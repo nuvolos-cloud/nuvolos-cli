@@ -7,9 +7,9 @@ nuvolos apps execute -o <org_slug> -s <space_slug> -i <instance_slug> -a <app_sl
 
 ## Selecting the application for command execution
 You can select the application where you intend to execute the command by providing the `app_slug` for the `-a` or `--app` 
-argument, while application context can be provided the `-o`, `-s`, `-i` arguments.
+option, while application context can be provided the `-o`, `-s`, `-i` options.
 
-On Nuvolos, you can omit the `-o`, `-s`, `-i` arguments if your target application is running in the same instance.
+On Nuvolos, you can omit the `-o`, `-s`, `-i` options if your target application is running in the same instance.
 However, if you'd like to submit a command to an application that is running in a separate instance, you need to specify the context for that application.
 
 Commands can only be run in a Nuvolos application that is in a RUNNING state. To understand how to verify that your application is running, 
@@ -37,16 +37,20 @@ such as the application context, submission timestamp, and the submitted command
 By default, the standard output and the standard error of your command are redirected to separate files to ensure preservation.
 The files are located in the folder introduced above, called `output.log` and `error.log`, respectively.
 
+!!! Note
+`nuvolos apps execute` supports default output redirect when exactly one command is submitted. If you submitted a command sequence
+(e.g. `python prepare.py && python evaluate.py`), you need to specify the files where you intend to redirect the `stdout` and `stderr`
+of each command, otherwise only the results of the last command will be saved in the default location.
+
 You can overwrite this redirection by defining your own in the submitted command, e.g:
 ```
-nuvolos apps execute -a your_app_slug -c 'python your_file.py> myoutput.log, 2> myerror.log'
+nuvolos apps execute -a your_app_slug -c 'python your_file.py > myoutput.log, 2> myerror.log'
 ```
 that will save the `stdout` and `stderr` of your command to the defined files in the working directory.
 
 !!! Note
-`nuvolos apps execute` supports output redirect when exactly one command is submitted. If you submitted a command sequence
-(e.g. `python prepare.py && python evaluate.py`), you need to specify the files where you intend to redirect the `stdout` and `stderr`
-of each command, otherwise only the results of the last command will be saved in the default location.
+The Nuvolos API looks for the `>` redirection operator in the submitted command to determine whether custom redirection has 
+been made. Keep in mind that using the operator in a different context in the command may result in unintended behavior.
 
 ## Sharing results between applications
 In the scenario where you've established a workflow with one application depending on the outcomes of another, the `/files` folder 

@@ -17,6 +17,7 @@ from .api_client import (
     execute_command_in_app,
     list_all_running_workloads_for_app,
     list_nodepools,
+    wait_for_app_running,
 )
 from .utils import (
     format_response,
@@ -273,6 +274,12 @@ def nv_apps_list(ctx, **kwargs):
     type=str,
     help="The node pool to use to run the app",
 )
+@click.option(
+    "-w",
+    "--wait",
+    is_flag=True,
+    help="Waits until the started application is in a running state",
+)
 @click.pass_context
 def nv_apps_start(ctx, app, **kwargs):
     """
@@ -287,6 +294,14 @@ def nv_apps_start(ctx, app, **kwargs):
         app_slug=app,
         node_pool=kwargs.get("node_pool", None),
     )
+    if kwargs.get("wait"):
+        res = wait_for_app_running(
+            org_slug=snapshot_ctx.get("org_slug"),
+            space_slug=snapshot_ctx.get("space_slug"),
+            instance_slug=snapshot_ctx.get("instance_slug"),
+            app_slug=app,
+        )
+
     return res
 
 

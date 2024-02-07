@@ -1,7 +1,9 @@
 from click import ClickException
-
+from datetime import datetime
+from time import sleep
 from .logging import clog
-from .config import get_api_config
+from .config import get_api_config, from_variable
+from .utils import exit_on_timeout
 
 import nuvolos_client_api
 from nuvolos_client_api.models import StartApp, ExecuteCommand
@@ -182,6 +184,40 @@ def start_app(
                 e,
                 f"Exception when starting Nuvolos app [{app_slug}]: {e}",
             )
+
+
+def wait_for_app_running(
+    org_slug: str, space_slug: str, instance_slug: str, app_slug: str
+):
+    running = False
+    start = datetime.utcnow()
+    stopped_timeout_secs = 30
+    starting_timeout_secs = int(from_variable("APP_START_TIMEOUT_SECS", 600))
+    while not running:
+        workloads = list_all_running_workloads_for_app(
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=instance_slug,
+            app_slug=app_slug,
+        )
+        if len(workloads) == 0:
+            exit_on_timeout(
+                start,
+                timeout_secs=stopped_timeout_secs,
+                err=f"No workload is available for app [{app_slug}] after {stopped_timeout_secs} seconds",
+            )
+            sleep(5)
+        else:
+            if workloads[0].status == "RUNNING":
+                running = True
+            else:
+                exit_on_timeout(
+                    start,
+                    timeout_secs=starting_timeout_secs,
+                    err=f"Application [{app_slug}] is still in STARTING state after {starting_timeout_secs} seconds",
+                )
+                sleep(5)
+    clog.info(f"App [{app_slug}] is successfully started and running.")
 
 
 def stop_app(org_slug: str, space_slug: str, instance_slug: str, app_slug: str):

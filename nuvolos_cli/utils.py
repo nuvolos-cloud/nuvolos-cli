@@ -1,11 +1,13 @@
 import click
 from click import ClickException
-from .logging import clog
+from datetime import datetime, timedelta
 from copy import deepcopy
 from functools import wraps
 from pydantic import BaseModel
 from tabulate import tabulate
 import yaml
+
+from .logging import clog
 
 
 def print_model_tabulated(model: BaseModel, tablefmt="github"):
@@ -126,3 +128,19 @@ def get_effective_snapshot_context(ctx, **kwargs):
 
 def filter_context_dict(d: dict, keep=[]):
     return {arg: value for arg, value in d.items() if arg in keep}
+
+
+def mask_string(string: str, show: int = 4):
+    return (len(string) - show) * "*" + string[-show:]
+
+
+def mask_api_key_in_config(config: dict):
+    if config.get("api_key"):
+        config["api_key"] = mask_string(config["api_key"])
+    return config
+
+
+def exit_on_timeout(start_time: datetime, timeout_secs: int, err: str):
+    difftime = datetime.utcnow() - start_time
+    if difftime > timedelta(seconds=timeout_secs):
+        raise ClickException(err)
