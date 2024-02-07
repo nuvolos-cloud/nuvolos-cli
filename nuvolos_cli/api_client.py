@@ -192,7 +192,7 @@ def wait_for_app_running(
     running = False
     start = datetime.utcnow()
     stopped_timeout_secs = 30
-    staring_timeout_secs = int(from_variable("APP_START_TIMEOUT_SECS", 600))
+    starting_timeout_secs = int(from_variable("APP_START_TIMEOUT_SECS", 600))
     while not running:
         workloads = list_all_running_workloads_for_app(
             org_slug=org_slug,
@@ -213,8 +213,8 @@ def wait_for_app_running(
             else:
                 exit_on_timeout(
                     start,
-                    timeout_secs=staring_timeout_secs,
-                    err=f"Application [{app_slug}] is still in STARTING state after {staring_timeout_secs} seconds",
+                    timeout_secs=starting_timeout_secs,
+                    err=f"Application [{app_slug}] is still in STARTING state after {starting_timeout_secs} seconds",
                 )
                 sleep(5)
     clog.info(f"App [{app_slug}] is successfully started and running.")
