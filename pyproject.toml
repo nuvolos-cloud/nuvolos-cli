@@ -32,16 +32,14 @@ dependencies = [
     "click-log>=0.4.0",
     "tabulate>=0.9.0",
     "pyyaml>=6.0.1",
-    "Nuvolos-Client-API"
+    "nuvolos-client-api>=1.0.0"
 ]
-# TODO add minimum version to Nuvolos-Client-API
-
 
 [tool.setuptools_scm]
 
 
 [project.urls]
-Source = "https://github.com/nuvolos-cloud/nuvolos-cli"
+Repository = "https://github.com/nuvolos-cloud/nuvolos-cli"
 Documentation = "https://nuvolos-cli.readthedocs.io/en/latest"
 
 [project.scripts]
