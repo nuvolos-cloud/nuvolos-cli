@@ -14,6 +14,5 @@ On Nuvolos, you can omit the `-o`, `-s`, `-i` options if your target application
 When the application is not running, the command will return an empty list. If the app is active, you can monitor
 its state by inspecting the `status` field in the response. Possible states are `RUNNING`, `STARTING` and `STOPPING`.
 
-!!! Note
-When specifying the `app_slug`, the command yields a list of running applications associated with the provided identifier. 
+!!! Note When specifying the `app_slug`, the command yields a list of running applications associated with the provided identifier. 
 This includes applications initiated by the current user, as well as applications running in shared mode and accessible to the current user.

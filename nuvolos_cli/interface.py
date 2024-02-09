@@ -70,7 +70,7 @@ def nv_orgs(ctx):
 @format_response
 def nv_orgs_list(ctx, **kwargs):
     """
-    Lists the Nuvolos organizations available to the current user
+    Lists the Nuvolos organizations available to the current user.
     """
     check_api_key_configured()
     res = list_orgs()
@@ -101,7 +101,7 @@ def nv_spaces(ctx):
 @format_response
 def nv_spaces_list(ctx, **kwargs):
     """
-    Lists the Nuvolos organizations / spaces / instances / apps available to the current user
+    Lists the Nuvolos organizations / spaces / instances / apps available to the current user.
     """
     check_api_key_configured()
     space_ctx = get_effective_space_context(ctx, **kwargs)
@@ -138,7 +138,7 @@ def nv_instances(ctx):
 @format_response
 def nv_instances_list(ctx, **kwargs):
     """
-    Lists the Nuvolos instances available to the current user
+    Lists the Nuvolos instances available to the current user.
     """
     check_api_key_configured()
     instance_ctx = get_effective_instance_context(ctx, **kwargs)
@@ -183,7 +183,7 @@ def nv_snapshots(ctx):
 @format_response
 def nv_snapshots_list(ctx, **kwargs):
     """
-    Lists the Nuvolos snapshots available to the current user
+    Lists the Nuvolos snapshots available to the current user.
     """
     check_api_key_configured()
     snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
@@ -236,7 +236,7 @@ def nv_apps():
 @format_response
 def nv_apps_list(ctx, **kwargs):
     """
-    Lists the Nuvolos applications available to the current user
+    Lists the Nuvolos applications available to the current user.
     """
     check_api_key_configured()
     snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
@@ -283,7 +283,7 @@ def nv_apps_list(ctx, **kwargs):
 @click.pass_context
 def nv_apps_start(ctx, app, **kwargs):
     """
-    Starts the Nuvolos application with the APP application slug
+    Starts the Nuvolos application with the APP application slug.
     """
     check_api_key_configured()
     snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
@@ -334,7 +334,7 @@ def nv_apps_start(ctx, app, **kwargs):
 @click.pass_context
 def nv_apps_stop(ctx, **kwargs):
     """
-    Stops the Nuvolos application with the given application slug
+    Stops the Nuvolos application with the given application slug.
     """
     check_api_key_configured()
     snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
@@ -467,6 +467,9 @@ def nv_apps_execute(ctx, command, **kwargs):
 )
 @format_response
 def nv_apps_list_nodepools(**kwargs):
+    """
+    Lists all nodepools available for dedicated app launch.
+    """
     check_api_key_configured()
     res = list_nodepools()
 
@@ -477,6 +480,6 @@ def nv_apps_list_nodepools(**kwargs):
 @click.pass_context
 def nv_info(ctx):
     """
-    Prints information about the Nuvolos CLI
+    Prints information about the Nuvolos CLI.
     """
     info(nuvolos_ctx=ctx.obj)
