@@ -15,5 +15,6 @@ When the application is not running, the command will return an empty list. If t
 its state by inspecting the `status` field in the response. Possible states are `RUNNING`, `STARTING` and `STOPPING`.
 
 !!! note 
+
     When specifying the `app_slug`, the command yields a list of running applications associated with the provided identifier. 
     This includes applications initiated by the current user, as well as applications running in shared mode and accessible to the current user.

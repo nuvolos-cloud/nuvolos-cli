@@ -38,6 +38,7 @@ By default, the standard output and the standard error of your command are redir
 The files are located in the folder introduced above, called `output.log` and `error.log`, respectively.
 
 !!! note
+
     `nuvolos apps execute` supports default output redirect when exactly one command is submitted. If you submitted a command sequence
     (e.g. `python prepare.py && python evaluate.py`), you need to specify the files where you intend to redirect the `stdout` and `stderr`
     of each command, otherwise only the results of the last command will be saved in the default location.
@@ -49,6 +50,7 @@ nuvolos apps execute -a your_app_slug -c 'python your_file.py > myoutput.log, 2>
 that will save the `stdout` and `stderr` of your command to the defined files in the working directory.
 
 !!! note 
+
     The Nuvolos API looks for the `>` redirection operator in the submitted command to determine whether custom redirection has 
     been made. Keep in mind that using the operator in a different context in the command may result in unintended behavior.
 

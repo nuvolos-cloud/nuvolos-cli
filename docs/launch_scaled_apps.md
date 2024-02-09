@@ -3,6 +3,7 @@
 When launching an application with the `nuvolos apps start` command, you can use the `-n` option to specify the nodepool for your application, where your application will run on a dedicated node. With this flag you can run your application with higher computing capacity and/or a GPU.
 
 !!! warning
+
     Running your application on a dedicated node is charged against credits of the underlying account. For further information, 
     see the related section in the [Nuvolos documentation](https://docs.nuvolos.cloud/user-guides/research-guides/high-performance-computing#how-to-scale-your-app).
 
