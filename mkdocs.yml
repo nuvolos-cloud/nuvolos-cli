@@ -1,0 +1,16 @@
+site_name: Nuvolos CLI
+theme: readthedocs
+nav:
+  - Home: index.md
+  - Installation: install.md
+  - Quickstart: quickstart.md
+  - Launch scaled applications: launch_scaled_apps.md
+  - Execute commands: execute_commands.md
+  - List running applications: list_running_applications.md
+  - Command reference: commands.md
+
+
+markdown_extensions:
+  - mkdocs-click
+  - attr_list
+  - admonition

@@ -1,0 +1,8 @@
+markdown
+mkdocs-click
+click>=8.1.7
+click-log>=0.4.0
+tabulate>=0.9.0
+pyyaml>=6.0.1
+nuvolos-client-api>=1.0.0
+
