@@ -14,6 +14,3 @@ markdown_extensions:
   - mkdocs-click
   - attr_list
   - admonition
-  - pymdownx.details
-  - pymdownx.superfences
-
