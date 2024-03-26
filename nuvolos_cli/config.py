@@ -102,13 +102,13 @@ def check_api_key_configured():
     if api_key is None:
         if not get_default_config_path().exists():
             raise ClickException(
-                "The Nuvolos API key must be set either as the NUVOLOS_API_KEY environment variable or with the `nuvolos configure --api-key` command."
+                "The Nuvolos API key must be set either as the NUVOLOS_API_KEY environment variable or with the `nuvolos config --api-key` command."
             )
         gdc = get_global_dict_config().read()
         api_key = gdc["api_key"]
         if api_key is None:
             raise ClickException(
-                "The Nuvolos API key must be set either as the NUVOLOS_API_KEY environment variable or with the `nuvolos configure --api-key` command."
+                "The Nuvolos API key must be set either as the NUVOLOS_API_KEY environment variable or with the `nuvolos config --api-key` command."
             )
     return api_key
 

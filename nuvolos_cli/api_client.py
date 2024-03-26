@@ -1,12 +1,16 @@
 from click import ClickException
 from datetime import datetime
 from time import sleep
+
+from humanize import naturalsize
 from .logging import clog
 from .config import get_api_config, from_variable
 from .utils import exit_on_timeout
 
 import nuvolos_client_api
 from nuvolos_client_api.models import StartApp, ExecuteCommand
+from nuvolos_client_api.models.application import Application
+from pydantic import StrictStr
 
 
 def _find_variables(tb, variables):
@@ -37,6 +41,22 @@ class NuvolosCliException(ClickException):
     def from_api_exception(cls, e: nuvolos_client_api.ApiException, message=None):
         url = _find_variables(e.__traceback__, ["url"]).get("url", "")
         return cls(e.status, e.reason, e.body, e.headers, url)
+
+
+class HumanizedApplication(Application):
+    storage_used: StrictStr
+
+    @classmethod
+    def from_application(cls, app: Application):
+        return cls(
+            slug=app.slug,
+            name=app.name,
+            description=app.description,
+            storage_used=naturalsize(app.storage_used, binary=False),
+            shared=app.shared,
+            exportable=app.exportable,
+            status=app.status,
+        )
 
 
 def list_orgs():
@@ -103,12 +123,15 @@ def list_apps(
     with nuvolos_client_api.ApiClient(config) as api_client:
         api_instance = nuvolos_client_api.AppsV1Api(api_client)
         try:
-            return api_instance.get_apps(
-                org_slug=org_slug,
-                space_slug=space_slug,
-                instance_slug=instance_slug,
-                snapshot_slug=snapshot_slug,
-            )
+            return [
+                HumanizedApplication.from_application(a)
+                for a in api_instance.get_apps(
+                    org_slug=org_slug,
+                    space_slug=space_slug,
+                    instance_slug=instance_slug,
+                    snapshot_slug=snapshot_slug,
+                )
+            ]
         except nuvolos_client_api.ApiException as e:
             raise NuvolosCliException.from_api_exception(
                 e,
