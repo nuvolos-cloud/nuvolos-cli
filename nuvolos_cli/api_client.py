@@ -3,12 +3,13 @@ from datetime import datetime
 from time import sleep
 
 from humanize import naturalsize
+from slugify import slugify
 from .logging import clog
 from .config import get_api_config, from_variable
 from .utils import exit_on_timeout
 
 import nuvolos_client_api
-from nuvolos_client_api.models import StartApp, ExecuteCommand
+from nuvolos_client_api.models import StartApp, ExecuteCommand, Task1
 from nuvolos_client_api.models.application import Application
 from pydantic import StrictStr
 
@@ -96,6 +97,39 @@ def list_instances(org_slug: str, space_slug: str):
             )
 
 
+def create_snapshot(
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    snapshot_name: str,
+    snapshot_description: str = None,
+    email_once_finished: bool = False,
+):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.InstancesV1Api(api_client)
+        try:
+            return api_instance.create_snapshot(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                body=nuvolos_client_api.SnapshotCreateRequest.from_dict(
+                    {
+                        "name": snapshot_name,
+                        "slug": slugify(snapshot_name, separator="_"),
+                        "description": snapshot_description,
+                        "email_once_finished": email_once_finished,
+                    }
+                ),
+                _headers={"Content-Type": "application/json"},
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when creating Nuvolos snapshot for org [{org_slug}], space [{space_slug}] and instance [{instance_slug}]: {e}",
+            )
+
+
 def list_snapshots(org_slug: str, space_slug: str, instance_slug: str):
     config = get_api_config()
     with nuvolos_client_api.ApiClient(config) as api_client:
@@ -111,6 +145,91 @@ def list_snapshots(org_slug: str, space_slug: str, instance_slug: str):
                 e,
                 f"Exception when listing Nuvolos snapshots for org [{org_slug}], space [{space_slug}] and instance [{instance_slug}]: {e}",
             )
+
+
+def delete_snapshot(
+    org_slug: str, space_slug: str, instance_slug: str, snapshot_slug: str
+):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.SnapshotsV1Api(api_client)
+        try:
+            return api_instance.delete_snapshot(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                snapshot_slug=snapshot_slug,
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when deleting Nuvolos snapshot [{snapshot_slug}] for org [{org_slug}], space [{space_slug}] and instance [{instance_slug}]: {e}",
+            )
+
+
+def get_task(tkid: int) -> Task1:
+    """
+    Retrieves the status and details of a specific task by its ID.
+
+    Args:
+        tkid: The ID of the task to retrieve
+
+    Returns:
+        The task object with status information
+    """
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.TasksV1Api(api_client)
+        try:
+            return api_instance.get_task(tkid=tkid)
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e, f"Exception when getting task status for task [{tkid}]: {e}"
+            )
+
+
+def wait_for_task(tkid: int, timeout_secs: int = None):
+    """
+    Waits for a task to complete, periodically checking its status.
+
+    Args:
+        tkid: The ID of the task to wait for
+        timeout_secs: Maximum time to wait in seconds before timing out (defaults to APP_TASK_TIMEOUT_SECS or 600)
+
+    Returns:
+        The completed task object
+    """
+    if timeout_secs is None:
+        timeout_secs = int(from_variable("APP_TASK_TIMEOUT_SECS", 600))
+
+    start = datetime.utcnow()
+    task = get_task(tkid)
+
+    # Use status rather than numeric codes
+    while task.status in ["CREATED", "QUEUED", "RUNNING"]:
+        exit_on_timeout(
+            start,
+            timeout_secs=timeout_secs,
+            err=f"Task [{tkid}] is still in progress (status={task.status}) after {timeout_secs} seconds",
+        )
+        sleep(5)
+        task = get_task(tkid)
+
+    if task.status == "COMPLETED":
+        clog.info(f"Task [{tkid}] completed successfully")
+        return task
+    elif task.status == "FAILED":
+        error_msg = f"Task [{tkid}] failed with error: {task.error}"
+        clog.error(error_msg)
+        raise NuvolosCliException(500, "Task failed", error_msg, {}, "")
+    elif task.status == "CANCELLED":
+        error_msg = f"Task [{tkid}] was cancelled"
+        clog.error(error_msg)
+        raise NuvolosCliException(500, "Task cancelled", error_msg, {}, "")
+    else:
+        error_msg = f"Task [{tkid}] ended with unexpected status: {task.status}"
+        clog.error(error_msg)
+        raise NuvolosCliException(500, "Unexpected task status", error_msg, {}, "")
 
 
 def list_apps(

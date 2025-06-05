@@ -82,6 +82,7 @@ def get_api_config():
         host=config["host"],
         api_key={"ApiKeyAuth": config["api_key"]},
         api_key_prefix={"ApiKeyAuth": "basic"},
+        debug=os.getenv("NUVOLOS_CLI_DEBUG", "false").lower() in ("true", "1", "yes"),
     )
 
 
