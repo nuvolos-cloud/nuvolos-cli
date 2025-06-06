@@ -10,6 +10,16 @@ If you are running the CLI on your own computer, you will need to configure your
 nuvolos config --api-key <YOUR_API_KEY>
 ```
 
+## Debug Logging
+
+You can enable detailed HTTP request and response logging by setting the `NUVOLOS_CLI_DEBUG` environment variable to `true`:
+
+```bash
+export NUVOLOS_CLI_DEBUG=true
+```
+
+When this variable is set, the CLI will print debug-level logs including API request URLs, headers, and responses.
+
 ## Using the CLI on the Nuvolos platform
 
 **On the Nuvolos platform, you can use the CLI without any configuration.**
