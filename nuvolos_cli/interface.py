@@ -18,6 +18,10 @@ from .api_client import (
     list_all_running_workloads_for_app,
     list_nodepools,
     wait_for_app_running,
+    create_snapshot,
+    delete_snapshot,
+    wait_for_task,
+    get_task,
 )
 from .utils import (
     format_response,
@@ -192,6 +196,142 @@ def nv_snapshots_list(ctx, **kwargs):
         space_slug=snapshot_ctx.get("space_slug"),
         instance_slug=snapshot_ctx.get("instance_slug"),
     )
+
+
+@nv_snapshots.command("create")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization to use to create a snapshot",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space to use to create a snapshot",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The slug of the Nuvolos instance to use to create a snapshot",
+)
+@click.option(
+    "-n",
+    "--name",
+    type=str,
+    required=True,
+    help="The name of the snapshot to create",
+)
+@click.option(
+    "-d",
+    "--description",
+    type=str,
+    help="The description of the snapshot to create",
+)
+@click.option(
+    "-e",
+    "--email",
+    is_flag=True,
+    help="Send an email notification when snapshot creation is complete",
+)
+@click.option(
+    "-w",
+    "--wait",
+    is_flag=True,
+    help="Wait until snapshot creation is complete",
+)
+@click.option(
+    "-f",
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
+)
+@click.pass_context
+@format_response
+def nv_snapshots_create(ctx, **kwargs):
+    """
+    Creates a new snapshot in the given instance.
+    """
+    check_api_key_configured()
+    snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    task = create_snapshot(
+        org_slug=snapshot_ctx.get("org_slug"),
+        space_slug=snapshot_ctx.get("space_slug"),
+        instance_slug=snapshot_ctx.get("instance_slug"),
+        snapshot_name=kwargs.get("name"),
+        snapshot_description=kwargs.get("description"),
+        email_once_finished=kwargs.get("email", False),
+    )
+
+    if kwargs.get("wait") and task is not None and hasattr(task, "tkid"):
+        clog.info(f"Waiting for snapshot creation task {task.tkid} to complete...")
+        task = wait_for_task(tkid=task.tkid)
+
+    return task
+
+
+@nv_snapshots.command("delete")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization to use to delete a snapshot",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space to use to delete a snapshot",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The slug of the Nuvolos instance to use to delete a snapshot",
+)
+@click.option(
+    "-p",
+    "--snapshot",
+    type=str,
+    required=True,
+    help="The slug of the snapshot to delete",
+)
+@click.option(
+    "-w",
+    "--wait",
+    is_flag=True,
+    help="Wait until snapshot deletion is complete",
+)
+@click.option(
+    "-f",
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
+)
+@click.pass_context
+@format_response
+def nv_snapshots_delete(ctx, **kwargs):
+    """
+    Deletes a snapshot from the given instance.
+    """
+    check_api_key_configured()
+    snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    task = delete_snapshot(
+        org_slug=snapshot_ctx.get("org_slug"),
+        space_slug=snapshot_ctx.get("space_slug"),
+        instance_slug=snapshot_ctx.get("instance_slug"),
+        snapshot_slug=kwargs.get("snapshot"),
+    )
+
+    if kwargs.get("wait") and task is not None and hasattr(task, "tkid"):
+        clog.info(f"Waiting for snapshot deletion task {task.tkid} to complete...")
+        task = wait_for_task(tkid=task.tkid)
+
+    return task
 
 
 @nuvolos.group("apps")
@@ -442,7 +582,7 @@ def nv_apps_execute(ctx, command, **kwargs):
     """
     Executes COMMAND in a Nuvolos application.
 
-    Example: 
+    Example:
     nuvolos apps execute -a my_slug "python -c 'from time import sleep;sleep(10)'"
     """
     check_api_key_configured()
@@ -474,6 +614,33 @@ def nv_apps_list_nodepools(**kwargs):
     res = list_nodepools()
 
     return res
+
+
+@nuvolos.group("tasks")
+@click.pass_context
+def nv_tasks(ctx):
+    """Manages Nuvolos tasks."""
+    pass
+
+
+@nv_tasks.command("get")
+@click.argument("tkid", type=int)
+@click.option(
+    "-f",
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
+)
+@click.pass_context
+@format_response
+def nv_task_get(ctx, tkid, **kwargs):
+    """
+    Retrieves the status and details of a specific task by its ID.
+    """
+    check_api_key_configured()
+    task = get_task(tkid=tkid)
+    return task
 
 
 @nuvolos.command("info")

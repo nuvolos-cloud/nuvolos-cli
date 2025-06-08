@@ -8,3 +8,4 @@ nuvolos-cli.egg-info
 nuvolos_cli.egg-info
 .vscode
 .nuvolos
+.venv

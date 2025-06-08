@@ -5,6 +5,7 @@ from copy import deepcopy
 from functools import wraps
 from pydantic import BaseModel
 from tabulate import tabulate
+from typing import List
 import yaml
 
 from .logging import clog
@@ -14,15 +15,15 @@ def print_model_tabulated(model: BaseModel, tablefmt="github"):
     click.echo(tabulate(model.dict(), tablefmt=tablefmt, headers="keys"))
 
 
-def print_models_tabulated(models: [BaseModel], tablefmt="github"):
+def print_models_tabulated(models: List[BaseModel], tablefmt="github"):
     click.echo(tabulate([m.dict() for m in models], tablefmt=tablefmt, headers="keys"))
 
 
-def print_models_json(models: [BaseModel]):
+def print_models_json(models: List[BaseModel]):
     click.echo([m.json() for m in models])
 
 
-def print_models_yaml(models: [BaseModel]):
+def print_models_yaml(models: List[BaseModel]):
     list_of_dicts = [m.dict() for m in models]
     click.echo(yaml.dump_all(list_of_dicts, sort_keys=True))
 
@@ -91,7 +92,7 @@ def get_effective_snapshot_context(ctx, **kwargs):
     space_slug = kwargs.get("space", None)
     instance_slug = kwargs.get("instance", None)
 
-    ret_ctx = deepcopy(ctx.obj)
+    ret_ctx = deepcopy(ctx.obj) if ctx.obj is not None else {}
 
     if org_slug:
         if not space_slug:
