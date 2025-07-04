@@ -11,8 +11,7 @@ authors = [
     {name = "Alphacruncher", email = "support@nuvolos.cloud"}
 ]
 readme = "README.md"
-license = "MIT"
-license-files = ["LICENSE"]
+license = { file = "LICENSE" }
 requires-python = ">=3.8"
 classifiers = [
     "Development Status :: 5 - Production/Stable",
