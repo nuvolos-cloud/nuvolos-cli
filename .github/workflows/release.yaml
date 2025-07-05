@@ -20,6 +20,8 @@ jobs:
 
       - name: Build and upload package
         run: |
+          echo "Installing setuptools"
+          pip install setuptools
           echo "Installing twine"
           pip install twine
           echo "Installing build"
