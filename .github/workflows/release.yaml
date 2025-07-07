@@ -21,11 +21,13 @@ jobs:
       - name: Build and upload package
         run: |
           echo "Installing setuptools"
-          pip install setuptools
+          pip install -U setuptools
           echo "Installing twine"
-          pip install twine
+          pip install -U twine
           echo "Installing build"
-          pip install build
+          pip install -U build
+          echo "Installing packaging"
+          pip install -U "packaging>=25.0"
           echo "Building package"
           python -m build
           echo "Uploading package"
