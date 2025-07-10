@@ -9,3 +9,4 @@ nuvolos_cli.egg-info
 .vscode
 .nuvolos
 .venv
+scripts/

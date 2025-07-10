@@ -427,7 +427,7 @@ def nv_apps_start(ctx, app, **kwargs):
     """
     check_api_key_configured()
     snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
-    res = start_app(
+    start_app(
         org_slug=snapshot_ctx.get("org_slug"),
         space_slug=snapshot_ctx.get("space_slug"),
         instance_slug=snapshot_ctx.get("instance_slug"),
@@ -435,14 +435,12 @@ def nv_apps_start(ctx, app, **kwargs):
         node_pool=kwargs.get("node_pool", None),
     )
     if kwargs.get("wait"):
-        res = wait_for_app_running(
+        wait_for_app_running(
             org_slug=snapshot_ctx.get("org_slug"),
             space_slug=snapshot_ctx.get("space_slug"),
             instance_slug=snapshot_ctx.get("instance_slug"),
             app_slug=app,
         )
-
-    return res
 
 
 @nv_apps.command("stop")
@@ -478,14 +476,12 @@ def nv_apps_stop(ctx, **kwargs):
     """
     check_api_key_configured()
     snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
-    res = stop_app(
+    stop_app(
         org_slug=snapshot_ctx.get("org_slug"),
         space_slug=snapshot_ctx.get("space_slug"),
         instance_slug=snapshot_ctx.get("instance_slug"),
         app_slug=kwargs.get("app"),
     )
-
-    return res
 
 
 @nv_apps.command("running")
