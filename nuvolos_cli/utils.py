@@ -1,3 +1,5 @@
+import json as json_mod
+
 import click
 from click import ClickException
 from datetime import datetime, timedelta
@@ -11,20 +13,40 @@ import yaml
 from .logging import clog
 
 
+def _model_to_dict(m):
+    """Convert a pydantic model to a dict, supporting both v1 and v2 APIs."""
+    if isinstance(m, dict):
+        return m
+    if isinstance(m, str):
+        try:
+            return json_mod.loads(m)
+        except (json_mod.JSONDecodeError, TypeError):
+            return {"value": m}
+    if hasattr(m, "to_dict"):
+        return m.to_dict()
+    if hasattr(m, "model_dump"):
+        return m.model_dump()
+    return m.dict()
+
+
 def print_model_tabulated(model: BaseModel, tablefmt="github"):
-    click.echo(tabulate(model.dict(), tablefmt=tablefmt, headers="keys"))
+    click.echo(tabulate(_model_to_dict(model), tablefmt=tablefmt, headers="keys"))
 
 
 def print_models_tabulated(models: List[BaseModel], tablefmt="github"):
-    click.echo(tabulate([m.dict() for m in models], tablefmt=tablefmt, headers="keys"))
+    click.echo(
+        tabulate([_model_to_dict(m) for m in models], tablefmt=tablefmt, headers="keys")
+    )
 
 
 def print_models_json(models: List[BaseModel]):
-    click.echo([m.json() for m in models])
+    click.echo(
+        json_mod.dumps([_model_to_dict(m) for m in models], indent=2, default=str)
+    )
 
 
 def print_models_yaml(models: List[BaseModel]):
-    list_of_dicts = [m.dict() for m in models]
+    list_of_dicts = [_model_to_dict(m) for m in models]
     click.echo(yaml.dump_all(list_of_dicts, sort_keys=True))
 
 

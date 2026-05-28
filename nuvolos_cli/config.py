@@ -48,7 +48,7 @@ def default_global_configs():
     return {
         "nuvolos_cli_version": __version__,
         "api_key": from_variable("NUVOLOS_API_KEY"),
-        "host": from_variable("NUVOLOS_API_HOST", "https://api.nuvolos.cloud"),
+        "host": from_variable("NUVOLOS_API_HOST", "https://api.eu1.nuvolos.cloud"),
     }
 
 
@@ -115,25 +115,21 @@ def check_api_key_configured():
 
 
 def info(nuvolos_ctx=None):
-    clog.info(
-        r"""
+    clog.info(r"""
  _   _                  _              ____ _     ___ 
 | \ | |_   ___   _____ | | ___  ___   / ___| |   |_ _|
 |  \| | | | \ \ / / _ \| |/ _ \/ __| | |   | |    | | 
 | |\  | |_| |\ V / (_) | | (_) \__ \ | |___| |___ | | 
 |_| \_|\__,_| \_/ \___/|_|\___/|___/  \____|_____|___|
                                                       
-"""
-    )
+""")
     clog.info(f"Version: {__version__}")
     gc = mask_api_key_in_config(get_config())
     if nuvolos_ctx:
-        clog.info(
-            f"""\nThe Nuvolos CLI context:
+        clog.info(f"""\nThe Nuvolos CLI context:
 Organization slug:\t{nuvolos_ctx['org_slug']}
 Space slug:\t\t{nuvolos_ctx['space_slug']}
-Instance slug:\t\t{nuvolos_ctx['instance_slug']}"""
-        )
+Instance slug:\t\t{nuvolos_ctx['instance_slug']}""")
     clog.info(
         f"\nThe Nuvolos CLI config ({get_default_config_path() if get_default_config_path().exists() else ''}):\n{yaml.dump(gc)}"
     )

@@ -4,9 +4,19 @@ nav:
   - Home: index.md
   - Installation: install.md
   - Quickstart: quickstart.md
-  - Launch scaled applications: launch_scaled_apps.md
-  - Execute commands: execute_commands.md
-  - List running applications: list_running_applications.md
+  - Guides:
+    - Launch scaled applications: launch_scaled_apps.md
+    - Execute commands: execute_commands.md
+    - List running applications: list_running_applications.md
+  - Management Documentation:
+    - Instance Management: instance_management.md
+    - Application Management: app_management.md
+    - Session Management: session_management.md
+    - Snapshot Management: snapshot_management.md
+    - Image Management: image_management.md
+    - Image Families: image_families_management.md
+    - Image Links: image_links_management.md
+    - Space Management: space_management.md
   - Command reference: commands.md
 
 

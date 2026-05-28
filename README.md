@@ -14,7 +14,7 @@
 
 Nuvolos CLI is command-line interface (CLI) for the [Nuvolos](https://nuvolos.cloud) platform. It allows you to interact with the Nuvolos platform from your local terminal.
 
-It interacts with the [Nuvolos REST API](https://api.nuvolos.cloud/docs) via the [nuvolos-client-api](https://github.com/nuvolos-cloud/nuvolos-client-api) package.
+It interacts with the [Nuvolos REST API](https://api.eu1.nuvolos.cloud/docs) via the [nuvolos-client-api](https://github.com/nuvolos-cloud/nuvolos-client-api) package.
 
 For installation and detailed usage, check out the [documentation](https://nuvolos-cli.readthedocs.io/en/latest/).
 

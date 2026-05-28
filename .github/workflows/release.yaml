@@ -10,13 +10,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Pull and checkout branch
-        uses: actions/checkout@master
+        uses: actions/checkout@v4.3.1
 
       - name: Install python
-        uses: conda-incubator/setup-miniconda@v2
+        uses: conda-incubator/setup-miniconda@v3.3.0
         with:
           auto-update-conda: false
-          python-version: 3.8
+          python-version: 3.13
 
       - name: Build and upload package
         run: |
