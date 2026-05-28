@@ -4,7 +4,7 @@ This document provides details on how to manage Nuvolos image families using the
 
 ## Overview
 
-Image families are logical groupings of related Nuvolos images. They provide organization and categorization for images in the Nuvolos platform. Each image belongs to a family, and families automatically manage priority ordering.
+An image family represents a Nuvolos application type — for example, JupyterLab — and appears as a tile in the Nuvolos App gallery. It groups all versioned images of that application (e.g., JupyterLab 4.5.6) together under a single entry. Each image belongs to exactly one family, and families automatically manage priority ordering.
 
 !!! danger "Permission Required"
     Creating image families requires the Image Manager role.

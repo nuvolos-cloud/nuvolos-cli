@@ -4,7 +4,7 @@ This document provides details on how to manage Nuvolos images using the Nuvolos
 
 ## Overview
 
-Images in Nuvolos represent containerized applications that can be instantiated as applications within instances. The CLI provides commands to list, create, and update images.
+An image in Nuvolos represents a specific version of a Nuvolos application — for example, JupyterLab 4.5.6. Images are containerized and can be instantiated as applications within instances. The CLI provides commands to list, create, and update images.
 
 !!! danger "Permission Required"
     Creating images requires the Image Manager role.
@@ -157,7 +157,7 @@ nuvolos images update 42 \
 
 ## Image Families
 
-Image families are logical groupings of related images. See [image_families_management.md](image_families_management.md) for managing image families.
+An image family represents a Nuvolos application type — for example, JupyterLab — and groups all versioned images of that application together. See [image_families_management.md](image_families_management.md) for managing image families.
 
 ## Related Commands
 
