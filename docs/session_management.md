@@ -54,31 +54,31 @@ Each session record includes:
 
 ```bash
 # List all sessions for an application
-nuvolos sessions list -o my-org -s my-space -i my-instance -a my-app
+nuvolos sessions list -o my_org -s my_space -i my_instance -a my_app
 
 # List sessions with specific sorting
-nuvolos sessions list -o my-org -s my-space -i my-instance -a my-app --sort asc
+nuvolos sessions list -o my_org -s my_space -i my_instance -a my_app --sort asc
 
 # List specific session by ID
 nuvolos sessions list \
-  -o my-org -s my-space -i my-instance \
-  -a my-app \
+  -o my_org -s my_space -i my_instance \
+  -a my_app \
   --session-id abc123def456
 
 # List sessions with pagination
 nuvolos sessions list \
-  -o my-org -s my-space -i my-instance \
-  -a my-app \
+  -o my_org -s my_space -i my_instance \
+  -a my_app \
   --page 2 --per-page 50
 
 # List as JSON for processing
 nuvolos sessions list \
-  -o my-org -s my-space -i my-instance \
-  -a my-app \
+  -o my_org -s my_space -i my_instance \
+  -a my_app \
   -f json
 
 # List sessions with context (if configured)
-nuvolos sessions list -a my-app
+nuvolos sessions list -a my_app
 ```
 
 ## Retrieving Session Logs

@@ -89,7 +89,7 @@ nuvolos image-families create \
   -n "Analytics Platforms" \
   --icon-url "https://example.com/icons/analytics.png" \
   -d "Analytics and visualization tools" \
-  --groups "analytics,visualization,business-intelligence"
+  --groups "analytics,visualization,business_intelligence"
 ```
 
 ## Related Commands

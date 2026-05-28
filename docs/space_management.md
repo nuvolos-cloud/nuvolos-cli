@@ -47,10 +47,10 @@ Each space record includes:
 
 ```bash
 # List spaces in an organization
-nuvolos spaces list -o my-org
+nuvolos spaces list -o my_org
 
 # List with JSON output
-nuvolos spaces list -o my-org -f json
+nuvolos spaces list -o my_org -f json
 
 # List spaces (assuming org is in context)
 nuvolos spaces list
@@ -60,9 +60,9 @@ nuvolos spaces list
 
 Once you have identified a space, you can:
 
-1. Create instances: `nuvolos instances create -o my-org -s my-space -n "instance-name"`
-2. List instances: `nuvolos instances list -o my-org -s my-space`
-3. View applications: `nuvolos apps list -o my-org -s my-space -i my-instance`
+1. Create instances: `nuvolos instances create -o my_org -s my_space -n "instance-name"`
+2. List instances: `nuvolos instances list -o my_org -s my_space`
+3. View applications: `nuvolos apps list -o my_org -s my_space -i my_instance`
 
 ## Related Commands
 

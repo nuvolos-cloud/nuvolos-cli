@@ -29,13 +29,13 @@ nuvolos apps list [options]
 
 ```bash
 # List applications in the development snapshot
-nuvolos apps list -o my-org -s my-space -i my-instance
+nuvolos apps list -o my_org -s my_space -i my_instance
 
 # List applications in a specific snapshot
-nuvolos apps list -o my-org -s my-space -i my-instance -p my-snapshot
+nuvolos apps list -o my_org -s my_space -i my_instance -p my_snapshot
 
 # List with JSON output
-nuvolos apps list -o my-org -s my-space -i my-instance -f json
+nuvolos apps list -o my_org -s my_space -i my_instance -f json
 ```
 
 ## Creating Applications
@@ -74,17 +74,17 @@ nuvolos apps create [options]
 ```bash
 # Create a simple application from an image
 nuvolos apps create \
-  -o my-org \
-  -s my-space \
-  -i my-instance \
+  -o my_org \
+  -s my_space \
+  -i my_instance \
   --imid 42 \
   -n "Data Science Lab"
 
 # Create an application with description and parameters
 nuvolos apps create \
-  -o my-org \
-  -s my-space \
-  -i my-instance \
+  -o my_org \
+  -s my_space \
+  -i my_instance \
   --imid 42 \
   -n "Jupyter Notebook" \
   -d "Jupyter Lab for data analysis" \
@@ -133,34 +133,34 @@ nuvolos apps derive [options]
 ```bash
 # Derive an application with default settings
 nuvolos apps derive \
-  -o my-org \
-  -s my-space \
-  -i my-instance \
-  -a my-app-slug
+  -o my_org \
+  -s my_space \
+  -i my_instance \
+  -a my_app_slug
 
 # Derive with custom tag and email notification
 nuvolos apps derive \
-  -o my-org \
-  -s my-space \
-  -i my-instance \
-  -a my-app-slug \
+  -o my_org \
+  -s my_space \
+  -i my_instance \
+  -a my_app_slug \
   -t "custom-v1.0" \
   -e
 
 # Derive and wait for completion
 nuvolos apps derive \
-  -o my-org \
-  -s my-space \
-  -i my-instance \
-  -a my-app-slug \
+  -o my_org \
+  -s my_space \
+  -i my_instance \
+  -a my_app_slug \
   -w
 
 # Derive without email notification
 nuvolos apps derive \
-  -o my-org \
-  -s my-space \
-  -i my-instance \
-  -a my-app-slug \
+  -o my_org \
+  -s my_space \
+  -i my_instance \
+  -a my_app_slug \
   --no-email
 ```
 
@@ -192,13 +192,13 @@ nuvolos apps start APP [options]
 
 ```bash
 # Start an application
-nuvolos apps start my-app-slug -o my-org -s my-space -i my-instance
+nuvolos apps start my_app_slug -o my_org -s my_space -i my_instance
 
 # Start on a specific node pool
-nuvolos apps start my-app-slug -o my-org -s my-space -i my-instance -n gpu-pool
+nuvolos apps start my_app_slug -o my_org -s my_space -i my_instance -n gpu_pool
 
 # Start and wait for application to be ready
-nuvolos apps start my-app-slug -o my-org -s my-space -i my-instance -w
+nuvolos apps start my_app_slug -o my_org -s my_space -i my_instance -w
 ```
 
 ## Stopping Applications
@@ -223,7 +223,7 @@ nuvolos apps stop [options]
 
 ```bash
 # Stop an application
-nuvolos apps stop -a my-app-slug -o my-org -s my-space -i my-instance
+nuvolos apps stop -a my_app_slug -o my_org -s my_space -i my_instance
 ```
 
 ## Listing Running Applications
@@ -251,7 +251,7 @@ nuvolos apps running [options]
 nuvolos apps running
 
 # List running workloads for a specific application
-nuvolos apps running -o my-org -s my-space -i my-instance -a my-app-slug
+nuvolos apps running -o my_org -s my_space -i my_instance -a my_app_slug
 ```
 
 ## Executing Commands in Applications
@@ -280,13 +280,13 @@ nuvolos apps execute [options] COMMAND
 
 ```bash
 # Execute a simple command
-nuvolos apps execute -a my-app-slug -o my-org -s my-space -i my-instance "ls -la"
+nuvolos apps execute -a my_app_slug -o my_org -s my_space -i my_instance "ls -la"
 
 # Execute a Python command
-nuvolos apps execute -a my-app-slug "python -c 'import numpy; print(numpy.__version__)'"
+nuvolos apps execute -a my_app_slug "python -c 'import numpy; print(numpy.__version__)'"
 
 # Execute a longer running command
-nuvolos apps execute -a my-app-slug "python training_script.py"
+nuvolos apps execute -a my_app_slug "python training_script.py"
 ```
 
 ## Listing Node Pools

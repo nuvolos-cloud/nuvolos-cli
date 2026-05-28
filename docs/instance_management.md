@@ -31,10 +31,10 @@ If you have configured context (via environment or config), you may omit these o
 
 ```bash
 # List instances in a specific org and space
-nuvolos instances list -o my-org -s my-space
+nuvolos instances list -o my_org -s my_space
 
 # List instances with JSON output
-nuvolos instances list -o my-org -s my-space -f json
+nuvolos instances list -o my_org -s my_space -f json
 
 # List instances (assuming org and space are in context)
 nuvolos instances list
@@ -73,16 +73,16 @@ nuvolos instances create [options]
 ```bash
 # Create a basic instance
 nuvolos instances create \
-  -o my-org \
-  -s my-space \
+  -o my_org \
+  -s my_space \
   -n "Development Instance"
 
 # Create an instance with custom slug and description
 nuvolos instances create \
-  -o my-org \
-  -s my-space \
+  -o my_org \
+  -s my_space \
   -n "Production Instance" \
-  --slug "prod-instance-001" \
+  --slug "prod_instance_001" \
   -d "Main production environment for customer-facing applications"
 
 # Create an instance (assuming org and space are in context)

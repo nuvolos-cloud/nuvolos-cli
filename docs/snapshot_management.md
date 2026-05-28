@@ -32,20 +32,20 @@ nuvolos snapshots create -n <snapshot-name> [options]
 1.  **Create a basic snapshot:**
 
     ```bash
-    nuvolos snapshots create -o my-org -s my-space -i my-instance -n "my-first-snapshot"
+    nuvolos snapshots create -o my_org -s my_space -i my_instance -n "my_first_snapshot"
     ```
 
 2.  **Create a snapshot with a description and wait for completion:**
 
     ```bash
-    nuvolos snapshots create -n "important-backup" -d "Backup before major changes" -w
+    nuvolos snapshots create -n "important_backup" -d "Backup before major changes" -w
     ```
     (Assuming org, space, and instance are set in the current context)
 
 3.  **Create a snapshot and receive an email notification:**
 
     ```bash
-    nuvolos snapshots create -n "nightly-backup" -e
+    nuvolos snapshots create -n "nightly_backup" -e
     ```
 
 ## Deleting Snapshots
@@ -76,13 +76,13 @@ nuvolos snapshots delete -p <snapshot-slug> [options]
 1.  **Delete a snapshot:**
 
     ```bash
-    nuvolos snapshots delete -o my-org -s my-space -i my-instance -p "my-old-snapshot"
+    nuvolos snapshots delete -o my_org -s my_space -i my_instance -p "my_old_snapshot"
     ```
 
 2.  **Delete a snapshot and wait for the operation to complete:**
 
     ```bash
-    nuvolos snapshots delete -p "snapshot-to-remove" -w
+    nuvolos snapshots delete -p "snapshot_to_remove" -w
     ```
     (Assuming org, space, and instance are set in the current context)
 

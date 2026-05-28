@@ -86,7 +86,7 @@ nuvolos images create \
   --docker-image-url "registry.example.com/jupyter:latest" \
   --description-md "Jupyter Lab environment" \
   --ifid 2 \
-  -o my-org \
+  -o my_org \
   --app-type jupyter \
   --configuration '{"cpu": "2", "memory": "4G"}' \
   --complexity 3
@@ -97,8 +97,8 @@ nuvolos images create \
   --docker-image-url "registry.example.com/rstudio:latest" \
   --description-md "RStudio server environment" \
   --ifid 3 \
-  -o my-org \
-  -s my-space \
+  -o my_org \
+  -s my_space \
   --app-type rstudio \
   --tags '{"type": "ide", "language": "r"}' \
   --public \
