@@ -20,6 +20,8 @@ from nuvolos_client_api.models import (
     ImageFamilyCreate,
     ImageUpdate,
     InstanceCreateRequest,
+    DistributionRequest,
+    TableUpdate,
 )
 from nuvolos_client_api.models.application import Application
 from pydantic import StrictStr
@@ -766,4 +768,250 @@ def get_session_logs(
             raise NuvolosCliException.from_api_exception(
                 e,
                 f"Exception when getting session logs for session [{session_id}], container [{container_name}]: {e}",
+            )
+
+
+def distribute_content(
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    snapshot_slug: str,
+    target_instances: list,
+    source_applications: list = None,
+    source_files: list = None,
+    source_tables: list = None,
+    auto_snapshot: bool = False,
+    notify_target_users: bool = False,
+    custom_email_message: str = None,
+):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.DistributionV1Api(api_client)
+        request_body = {
+            "target_instances": target_instances,
+            "auto_snapshot": auto_snapshot,
+            "notify_target_users": notify_target_users,
+        }
+        if source_applications:
+            request_body["source_applications"] = source_applications
+        if source_files:
+            request_body["source_files"] = source_files
+        if source_tables:
+            request_body["source_tables"] = source_tables
+        if custom_email_message:
+            request_body["custom_email_message"] = custom_email_message
+        try:
+            return api_instance.distribute_content(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                snapshot_slug=snapshot_slug,
+                distribution_request=DistributionRequest.from_dict(request_body),
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when distributing content from org [{org_slug}], space [{space_slug}], instance [{instance_slug}], snapshot [{snapshot_slug}]: {e}",
+            )
+
+
+def list_files(
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    snapshot_slug: str,
+    area: str = "files",
+    local_path: str = None,
+):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.FilesV1Api(api_client)
+        try:
+            if area == "files":
+                if local_path:
+                    return api_instance.get_files_in_files_area_0(
+                        org_slug=org_slug,
+                        space_slug=space_slug,
+                        instance_slug=instance_slug,
+                        snapshot_slug=snapshot_slug,
+                        local_path=local_path,
+                    )
+                return api_instance.get_files_in_files_area(
+                    org_slug=org_slug,
+                    space_slug=space_slug,
+                    instance_slug=instance_slug,
+                    snapshot_slug=snapshot_slug,
+                )
+
+            if area == "home":
+                if local_path:
+                    return api_instance.get_files_in_home_area_0(
+                        org_slug=org_slug,
+                        space_slug=space_slug,
+                        instance_slug=instance_slug,
+                        snapshot_slug=snapshot_slug,
+                        local_path=local_path,
+                    )
+                return api_instance.get_files_in_home_area(
+                    org_slug=org_slug,
+                    space_slug=space_slug,
+                    instance_slug=instance_slug,
+                    snapshot_slug=snapshot_slug,
+                )
+
+            raise ClickException("Area must be either 'files' or 'home'")
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when listing files in area [{area}] for org [{org_slug}], space [{space_slug}], instance [{instance_slug}], snapshot [{snapshot_slug}]: {e}",
+            )
+
+
+def list_tables(org_slug: str, space_slug: str, instance_slug: str, snapshot_slug: str):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.TablesV1Api(api_client)
+        try:
+            return api_instance.get_tables(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                snapshot_slug=snapshot_slug,
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when listing tables for org [{org_slug}], space [{space_slug}], instance [{instance_slug}], snapshot [{snapshot_slug}]: {e}",
+            )
+
+
+def get_schema_ddl(
+    org_slug: str, space_slug: str, instance_slug: str, snapshot_slug: str
+):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.TablesV1Api(api_client)
+        try:
+            return api_instance.get_schema_ddl(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                snapshot_slug=snapshot_slug,
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when retrieving schema DDL for org [{org_slug}], space [{space_slug}], instance [{instance_slug}], snapshot [{snapshot_slug}]: {e}",
+            )
+
+
+def get_table_columns(
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    snapshot_slug: str,
+    table_slug: str,
+):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.TablesV1Api(api_client)
+        try:
+            return api_instance.get_table_columns(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                snapshot_slug=snapshot_slug,
+                table_slug=table_slug,
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when retrieving columns for table [{table_slug}] in org [{org_slug}], space [{space_slug}], instance [{instance_slug}], snapshot [{snapshot_slug}]: {e}",
+            )
+
+
+def get_table_ddl(
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    snapshot_slug: str,
+    table_slug: str,
+):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.TablesV1Api(api_client)
+        try:
+            return api_instance.get_table_ddl(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                snapshot_slug=snapshot_slug,
+                table_slug=table_slug,
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when retrieving DDL for table [{table_slug}] in org [{org_slug}], space [{space_slug}], instance [{instance_slug}], snapshot [{snapshot_slug}]: {e}",
+            )
+
+
+def rename_table(
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    snapshot_slug: str,
+    table_slug: str,
+    new_slug: str = None,
+    new_name: str = None,
+):
+    body = {}
+    if new_slug is not None:
+        body["slug"] = new_slug
+    if new_name is not None:
+        body["name"] = new_name
+    if not body:
+        raise ClickException("Provide at least one of --new-slug or --new-name")
+
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.TablesV1Api(api_client)
+        try:
+            return api_instance.rename_table(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                snapshot_slug=snapshot_slug,
+                table_slug=table_slug,
+                table_update=TableUpdate.from_dict(body),
+                _headers={"Content-Type": "application/json"},
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when renaming table [{table_slug}] in org [{org_slug}], space [{space_slug}], instance [{instance_slug}], snapshot [{snapshot_slug}]: {e}",
+            )
+
+
+def delete_table(
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    snapshot_slug: str,
+    table_slug: str,
+):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.TablesV1Api(api_client)
+        try:
+            return api_instance.delete_table(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                snapshot_slug=snapshot_slug,
+                table_slug=table_slug,
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when deleting table [{table_slug}] in org [{org_slug}], space [{space_slug}], instance [{instance_slug}], snapshot [{snapshot_slug}]: {e}",
             )

@@ -70,6 +70,26 @@ See [Image Links Management](image_links_management.md) for detailed usage.
 
 See [Session Management](session_management.md) for detailed usage.
 
+### Files Management
+- `nuvolos files list` - List files from `files` or `home` snapshot areas
+
+See [Files Management](files_management.md) for detailed usage.
+
+### Tables Management
+- `nuvolos tables list` - List tables in a snapshot
+- `nuvolos tables schema-ddl` - Get schema DDL for a snapshot
+- `nuvolos tables columns` - Get columns for a table
+- `nuvolos tables ddl` - Get DDL for a table
+- `nuvolos tables rename` - Rename a table
+- `nuvolos tables delete` - Delete a table
+
+See [Tables Management](tables_management.md) for detailed usage.
+
+### Distribution
+- `nuvolos distribution distribute` - Distribute files, applications, and tables from a snapshot to target instances
+
+See [Distribution Management](distribution_management.md) for detailed usage.
+
 ### Task Management
 - `nuvolos tasks get` - Get status of a task by ID
 

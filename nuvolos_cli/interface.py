@@ -34,6 +34,14 @@ from .api_client import (
     list_image_links,
     list_sessions,
     get_session_logs,
+    distribute_content,
+    list_files,
+    list_tables,
+    get_schema_ddl,
+    get_table_columns,
+    get_table_ddl,
+    rename_table,
+    delete_table,
 )
 from .utils import (
     format_response,
@@ -1398,3 +1406,519 @@ def nv_sessions_logs(ctx, **kwargs):
         click.echo(tabulate(rows, headers=table_columns, tablefmt="github"))
     else:
         click.echo(result)
+
+
+# --- Distribution ---
+
+
+@nuvolos.group("distribution")
+def nv_distribution():
+    """Distributes content from a snapshot to target instances."""
+    pass
+
+
+@nv_distribution.command("distribute")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the source Nuvolos organization",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the source Nuvolos space",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The slug of the source Nuvolos instance",
+)
+@click.option(
+    "-p",
+    "--snapshot",
+    type=str,
+    default="development",
+    help="The slug of the source snapshot to distribute from (default: development)",
+)
+@click.option(
+    "--targets",
+    type=str,
+    required=True,
+    help="JSON array of target instances, each with org_slug, space_slug, instance_slug",
+)
+@click.option(
+    "--apps",
+    type=str,
+    help="Comma-separated list of application slugs to distribute",
+)
+@click.option(
+    "--files",
+    type=str,
+    help="Comma-separated list of file paths to distribute",
+)
+@click.option(
+    "--tables",
+    type=str,
+    help="Comma-separated list of table names to distribute",
+)
+@click.option(
+    "--auto-snapshot/--no-auto-snapshot",
+    default=False,
+    help="Create a snapshot of target instances before distributing (default: no)",
+)
+@click.option(
+    "--notify/--no-notify",
+    default=False,
+    help="Notify target users when distribution is complete (default: no)",
+)
+@click.option(
+    "--message",
+    type=str,
+    help="Custom email message to send with the notification",
+)
+@click.option(
+    "-w",
+    "--wait",
+    is_flag=True,
+    help="Wait until the distribution task is complete",
+)
+@click.option(
+    "-f",
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
+)
+@click.pass_context
+@format_response
+def nv_distribution_distribute(ctx, **kwargs):
+    """
+    Distribute selected files, applications, and tables from a snapshot to target instances.
+    """
+    check_api_key_configured()
+    snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+
+    target_instances = json.loads(kwargs["targets"])
+
+    source_applications = None
+    if kwargs.get("apps"):
+        source_applications = [a.strip() for a in kwargs["apps"].split(",")]
+
+    source_files = None
+    if kwargs.get("files"):
+        source_files = [f.strip() for f in kwargs["files"].split(",")]
+
+    source_tables = None
+    if kwargs.get("tables"):
+        source_tables = [t.strip() for t in kwargs["tables"].split(",")]
+
+    task = distribute_content(
+        org_slug=snapshot_ctx.get("org_slug"),
+        space_slug=snapshot_ctx.get("space_slug"),
+        instance_slug=snapshot_ctx.get("instance_slug"),
+        snapshot_slug=kwargs["snapshot"],
+        target_instances=target_instances,
+        source_applications=source_applications,
+        source_files=source_files,
+        source_tables=source_tables,
+        auto_snapshot=kwargs.get("auto_snapshot", False),
+        notify_target_users=kwargs.get("notify", False),
+        custom_email_message=kwargs.get("message"),
+    )
+
+    if kwargs.get("wait") and task is not None and hasattr(task, "tkid"):
+        clog.info(f"Waiting for distribution task {task.tkid} to complete...")
+        task = wait_for_task(tkid=task.tkid)
+
+    return task
+
+
+# --- Files ---
+
+
+@nuvolos.group("files")
+def nv_files():
+    """Manages files in snapshot areas."""
+    pass
+
+
+@nv_files.command("list")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The slug of the Nuvolos instance",
+)
+@click.option(
+    "-p",
+    "--snapshot",
+    type=str,
+    default="development",
+    help="The slug of the Nuvolos snapshot to use",
+)
+@click.option(
+    "-a",
+    "--area",
+    type=click.Choice(["files", "home"]),
+    default="files",
+    help="Area to list files from (default: files)",
+)
+@click.option(
+    "--path",
+    type=str,
+    help="Optional path inside the selected area",
+)
+@click.option(
+    "-f",
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
+)
+@click.pass_context
+@format_response
+def nv_files_list(ctx, **kwargs):
+    """
+    Lists files in the selected snapshot area.
+    """
+    check_api_key_configured()
+    snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    return list_files(
+        org_slug=snapshot_ctx.get("org_slug"),
+        space_slug=snapshot_ctx.get("space_slug"),
+        instance_slug=snapshot_ctx.get("instance_slug"),
+        snapshot_slug=kwargs["snapshot"],
+        area=kwargs["area"],
+        local_path=kwargs.get("path"),
+    )
+
+
+# --- Tables ---
+
+
+@nuvolos.group("tables")
+def nv_tables():
+    """Manages tables in snapshots."""
+    pass
+
+
+@nv_tables.command("list")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The slug of the Nuvolos instance",
+)
+@click.option(
+    "-p",
+    "--snapshot",
+    type=str,
+    default="development",
+    help="The slug of the Nuvolos snapshot to use",
+)
+@click.option(
+    "-f",
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
+)
+@click.pass_context
+@format_response
+def nv_tables_list(ctx, **kwargs):
+    """
+    Lists tables in the selected snapshot.
+    """
+    check_api_key_configured()
+    snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    return list_tables(
+        org_slug=snapshot_ctx.get("org_slug"),
+        space_slug=snapshot_ctx.get("space_slug"),
+        instance_slug=snapshot_ctx.get("instance_slug"),
+        snapshot_slug=kwargs["snapshot"],
+    )
+
+
+@nv_tables.command("schema-ddl")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The slug of the Nuvolos instance",
+)
+@click.option(
+    "-p",
+    "--snapshot",
+    type=str,
+    default="development",
+    help="The slug of the Nuvolos snapshot to use",
+)
+@click.option(
+    "-f",
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
+)
+@click.pass_context
+@format_response
+def nv_tables_schema_ddl(ctx, **kwargs):
+    """
+    Returns the database schema DDL for the selected snapshot.
+    """
+    check_api_key_configured()
+    snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    return get_schema_ddl(
+        org_slug=snapshot_ctx.get("org_slug"),
+        space_slug=snapshot_ctx.get("space_slug"),
+        instance_slug=snapshot_ctx.get("instance_slug"),
+        snapshot_slug=kwargs["snapshot"],
+    )
+
+
+@nv_tables.command("columns")
+@click.argument("table")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The slug of the Nuvolos instance",
+)
+@click.option(
+    "-p",
+    "--snapshot",
+    type=str,
+    default="development",
+    help="The slug of the Nuvolos snapshot to use",
+)
+@click.option(
+    "-f",
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
+)
+@click.pass_context
+@format_response
+def nv_tables_columns(ctx, table, **kwargs):
+    """
+    Returns columns for TABLE in the selected snapshot.
+    """
+    check_api_key_configured()
+    snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    return get_table_columns(
+        org_slug=snapshot_ctx.get("org_slug"),
+        space_slug=snapshot_ctx.get("space_slug"),
+        instance_slug=snapshot_ctx.get("instance_slug"),
+        snapshot_slug=kwargs["snapshot"],
+        table_slug=table,
+    )
+
+
+@nv_tables.command("ddl")
+@click.argument("table")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The slug of the Nuvolos instance",
+)
+@click.option(
+    "-p",
+    "--snapshot",
+    type=str,
+    default="development",
+    help="The slug of the Nuvolos snapshot to use",
+)
+@click.option(
+    "-f",
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
+)
+@click.pass_context
+@format_response
+def nv_tables_ddl(ctx, table, **kwargs):
+    """
+    Returns DDL for TABLE in the selected snapshot.
+    """
+    check_api_key_configured()
+    snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    return get_table_ddl(
+        org_slug=snapshot_ctx.get("org_slug"),
+        space_slug=snapshot_ctx.get("space_slug"),
+        instance_slug=snapshot_ctx.get("instance_slug"),
+        snapshot_slug=kwargs["snapshot"],
+        table_slug=table,
+    )
+
+
+@nv_tables.command("rename")
+@click.argument("table")
+@click.option(
+    "--new-slug",
+    type=str,
+    help="New slug for the table",
+)
+@click.option(
+    "--new-name",
+    type=str,
+    help="New display name for the table",
+)
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The slug of the Nuvolos instance",
+)
+@click.option(
+    "-p",
+    "--snapshot",
+    type=str,
+    default="development",
+    help="The slug of the Nuvolos snapshot to use",
+)
+@click.option(
+    "-f",
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
+)
+@click.pass_context
+@format_response
+def nv_tables_rename(ctx, table, **kwargs):
+    """
+    Renames TABLE in the selected snapshot.
+    """
+    check_api_key_configured()
+    snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    return rename_table(
+        org_slug=snapshot_ctx.get("org_slug"),
+        space_slug=snapshot_ctx.get("space_slug"),
+        instance_slug=snapshot_ctx.get("instance_slug"),
+        snapshot_slug=kwargs["snapshot"],
+        table_slug=table,
+        new_slug=kwargs.get("new_slug"),
+        new_name=kwargs.get("new_name"),
+    )
+
+
+@nv_tables.command("delete")
+@click.argument("table")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The slug of the Nuvolos instance",
+)
+@click.option(
+    "-p",
+    "--snapshot",
+    type=str,
+    default="development",
+    help="The slug of the Nuvolos snapshot to use",
+)
+@click.pass_context
+def nv_tables_delete(ctx, table, **kwargs):
+    """
+    Deletes TABLE from the selected snapshot.
+    """
+    check_api_key_configured()
+    snapshot_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    delete_table(
+        org_slug=snapshot_ctx.get("org_slug"),
+        space_slug=snapshot_ctx.get("space_slug"),
+        instance_slug=snapshot_ctx.get("instance_slug"),
+        snapshot_slug=kwargs["snapshot"],
+        table_slug=table,
+    )
+    click.echo(f"Table [{table}] deleted successfully")

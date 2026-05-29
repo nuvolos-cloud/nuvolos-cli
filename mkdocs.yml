@@ -17,6 +17,9 @@ nav:
     - Image Families: image_families_management.md
     - Image Links: image_links_management.md
     - Space Management: space_management.md
+    - Files Management: files_management.md
+    - Tables Management: tables_management.md
+    - Distribution Management: distribution_management.md
   - Command reference: commands.md
 
 
