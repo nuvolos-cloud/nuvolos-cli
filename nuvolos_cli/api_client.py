@@ -127,7 +127,7 @@ def create_snapshot(
                 org_slug=org_slug,
                 space_slug=space_slug,
                 instance_slug=instance_slug,
-                body=nuvolos_client_api.SnapshotCreateRequest.from_dict(
+                snapshot_create_request=nuvolos_client_api.SnapshotCreateRequest.from_dict(
                     {
                         "name": snapshot_name,
                         "slug": slugify(snapshot_name, separator="_"),
@@ -321,7 +321,7 @@ def start_app(
                     space_slug=space_slug,
                     instance_slug=instance_slug,
                     app_slug=app_slug,
-                    body=StartApp.from_dict({"node_pool": node_pool}),
+                    start_app=StartApp.from_dict({"node_pool": node_pool}),
                     _headers={"Content-Type": "application/json"},
                 )
                 clog.info(
@@ -407,7 +407,7 @@ def execute_command_in_app(
                 space_slug=space_slug,
                 instance_slug=instance_slug,
                 app_slug=app_slug,
-                body=ExecuteCommand.from_dict({"command": command}),
+                execute_command=ExecuteCommand.from_dict({"command": command}),
                 _headers={"Content-Type": "application/json"},
             )
         except nuvolos_client_api.ApiException as e:
