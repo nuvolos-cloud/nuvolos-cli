@@ -37,6 +37,11 @@ dependencies = [
     "python-slugify>=8.0.4",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "black>=25.1.0",
+]
+
 [tool.setuptools_scm]
 
 
