@@ -20,6 +20,7 @@ nav:
     - Files Management: files_management.md
     - Tables Management: tables_management.md
     - Distribution Management: distribution_management.md
+    - LFS Management: lfs_management.md
   - Command reference: commands.md
 
 

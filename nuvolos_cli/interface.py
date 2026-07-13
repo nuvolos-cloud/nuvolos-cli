@@ -31,6 +31,7 @@ from .api_client import (
     update_image,
     list_image_families,
     create_image_family,
+    update_image_family,
     list_image_links,
     list_sessions,
     get_session_logs,
@@ -42,6 +43,8 @@ from .api_client import (
     get_table_ddl,
     rename_table,
     delete_table,
+    list_lfs_shares,
+    cleanup_lfs_share,
 )
 from .utils import (
     format_response,
@@ -1186,6 +1189,68 @@ def nv_image_families_create(**kwargs):
     return res
 
 
+@nv_image_families.command("update")
+@click.argument("ifid", type=int)
+@click.option(
+    "-n",
+    "--name",
+    type=str,
+    help="New name for the image family",
+)
+@click.option(
+    "--icon-url",
+    type=str,
+    help="New URL of the icon for the image family",
+)
+@click.option(
+    "-d",
+    "--description",
+    type=str,
+    help="New description of the image family",
+)
+@click.option(
+    "--groups",
+    type=str,
+    help="Comma-separated list of groups",
+)
+@click.option(
+    "--disabled-reason",
+    type=int,
+    help="New disabled reason code for the image family",
+)
+@click.option(
+    "--priority",
+    type=float,
+    help="New priority for the image family",
+)
+@click.option(
+    "-f",
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
+)
+@format_response
+def nv_image_families_update(ifid, **kwargs):
+    """
+    Updates fields of an existing image family. Only provided fields are updated.
+    """
+    check_api_key_configured()
+    groups = None
+    if kwargs.get("groups"):
+        groups = [g.strip() for g in kwargs["groups"].split(",")]
+    res = update_image_family(
+        ifid=ifid,
+        name=kwargs.get("name"),
+        icon_url=kwargs.get("icon_url"),
+        description=kwargs.get("description"),
+        groups=groups,
+        disabled_reason=kwargs.get("disabled_reason"),
+        priority=kwargs.get("priority"),
+    )
+    return res
+
+
 # --- Image Links ---
 
 
@@ -1922,3 +1987,95 @@ def nv_tables_delete(ctx, table, **kwargs):
         table_slug=table,
     )
     click.echo(f"Table [{table}] deleted successfully")
+
+
+@nuvolos.group("lfs")
+@click.pass_context
+def nv_lfs(ctx):
+    pass
+
+
+@nv_lfs.command("list")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization to use to list LFS shares",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space to use to list LFS shares",
+)
+@click.option(
+    "-f",
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
+)
+@click.pass_context
+@format_response
+def nv_lfs_list(ctx, **kwargs):
+    """
+    Lists active LFS shares attached to a space.
+    """
+    check_api_key_configured()
+    space_ctx = get_effective_instance_context(ctx, **kwargs)
+    return list_lfs_shares(
+        org_slug=space_ctx.get("org_slug"), space_slug=space_ctx.get("space_slug")
+    )
+
+
+@nv_lfs.command("cleanup")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization to use to clean up an LFS share",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space to use to clean up an LFS share",
+)
+@click.option(
+    "--afsid",
+    type=int,
+    required=True,
+    help="The id of the LFS share to clean up",
+)
+@click.option(
+    "-w",
+    "--wait",
+    is_flag=True,
+    help="Wait until the cleanup task is complete",
+)
+@click.option(
+    "-f",
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
+)
+@click.pass_context
+@format_response
+def nv_lfs_cleanup(ctx, **kwargs):
+    """
+    Removes incomplete multipart uploads to an LFS share.
+    """
+    check_api_key_configured()
+    space_ctx = get_effective_instance_context(ctx, **kwargs)
+    task = cleanup_lfs_share(
+        org_slug=space_ctx.get("org_slug"),
+        space_slug=space_ctx.get("space_slug"),
+        afsid=kwargs.get("afsid"),
+    )
+
+    if kwargs.get("wait") and task is not None and hasattr(task, "tkid"):
+        clog.info(f"Waiting for LFS share cleanup task {task.tkid} to complete...")
+        task = wait_for_task(tkid=task.tkid)
+
+    return task
