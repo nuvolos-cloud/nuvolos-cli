@@ -716,6 +716,10 @@ def update_image_family(
             body["disabled_reason"] = disabled_reason
         if priority is not None:
             body["priority"] = priority
+        if not body:
+            raise ClickException(
+                "Provide at least one field to update (name, icon_url, description, groups, disabled_reason, priority)"
+            )
         try:
             return api_instance.update_image_family(
                 ifid=ifid,

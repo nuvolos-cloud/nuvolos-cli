@@ -1237,8 +1237,23 @@ def nv_image_families_update(ifid, **kwargs):
     """
     check_api_key_configured()
     groups = None
-    if kwargs.get("groups"):
-        groups = [g.strip() for g in kwargs["groups"].split(",")]
+    if kwargs.get("groups") is not None:
+        groups = [g.strip() for g in kwargs["groups"].split(",") if g.strip()]
+        if not groups:
+            raise click.ClickException("--groups must include at least one group")
+
+    if (
+        kwargs.get("name") is None
+        and kwargs.get("icon_url") is None
+        and kwargs.get("description") is None
+        and groups is None
+        and kwargs.get("disabled_reason") is None
+        and kwargs.get("priority") is None
+    ):
+        raise click.ClickException(
+            "Provide at least one field to update (e.g. --name, --icon-url, --description, --groups, --disabled-reason, --priority)"
+        )
+
     res = update_image_family(
         ifid=ifid,
         name=kwargs.get("name"),
@@ -2023,6 +2038,10 @@ def nv_lfs_list(ctx, **kwargs):
     """
     check_api_key_configured()
     space_ctx = get_effective_instance_context(ctx, **kwargs)
+    if not space_ctx.get("org_slug") or not space_ctx.get("space_slug"):
+        raise click.ClickException(
+            "Missing space context. Please specify both --org and --space (or set them via `nuvolos context`)"
+        )
     return list_lfs_shares(
         org_slug=space_ctx.get("org_slug"), space_slug=space_ctx.get("space_slug")
     )
@@ -2068,10 +2087,14 @@ def nv_lfs_cleanup(ctx, **kwargs):
     """
     check_api_key_configured()
     space_ctx = get_effective_instance_context(ctx, **kwargs)
+    if not space_ctx.get("org_slug") or not space_ctx.get("space_slug"):
+        raise click.ClickException(
+            "Missing space context. Please specify both --org and --space (or set them via `nuvolos context`)"
+        )
     task = cleanup_lfs_share(
         org_slug=space_ctx.get("org_slug"),
         space_slug=space_ctx.get("space_slug"),
-        afsid=kwargs.get("afsid"),
+        afsid=kwargs["afsid"],
     )
 
     if kwargs.get("wait") and task is not None and hasattr(task, "tkid"):
