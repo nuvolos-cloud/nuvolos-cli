@@ -18,6 +18,7 @@ from nuvolos_client_api.models import (
     DeriveApp,
     ImageCreate,
     ImageFamilyCreate,
+    ImageFamilyUpdate,
     ImageUpdate,
     InstanceCreateRequest,
     DistributionRequest,
@@ -690,6 +691,47 @@ def create_image_family(
             )
 
 
+def update_image_family(
+    ifid: int,
+    name: str = None,
+    icon_url: str = None,
+    description: str = None,
+    groups: list = None,
+    disabled_reason: int = None,
+    priority: float = None,
+):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.ImageFamiliesV1Api(api_client)
+        body = {}
+        if name is not None:
+            body["name"] = name
+        if icon_url is not None:
+            body["icon_url"] = icon_url
+        if description is not None:
+            body["description"] = description
+        if groups is not None:
+            body["groups"] = groups
+        if disabled_reason is not None:
+            body["disabled_reason"] = disabled_reason
+        if priority is not None:
+            body["priority"] = priority
+        if not body:
+            raise ClickException(
+                "Provide at least one field to update (name, icon_url, description, groups, disabled_reason, priority)"
+            )
+        try:
+            return api_instance.update_image_family(
+                ifid=ifid,
+                image_family_update=ImageFamilyUpdate.from_dict(body),
+                _headers={"Content-Type": "application/json"},
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e, f"Exception when updating image family [{ifid}]: {e}"
+            )
+
+
 def list_image_links():
     config = get_api_config()
     with nuvolos_client_api.ApiClient(config) as api_client:
@@ -1014,4 +1056,37 @@ def delete_table(
             raise NuvolosCliException.from_api_exception(
                 e,
                 f"Exception when deleting table [{table_slug}] in org [{org_slug}], space [{space_slug}], instance [{instance_slug}], snapshot [{snapshot_slug}]: {e}",
+            )
+
+
+def list_lfs_shares(org_slug: str, space_slug: str):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.LFSV1Api(api_client)
+        try:
+            return api_instance.list_lfs_shares(
+                org_slug=org_slug,
+                space_slug=space_slug,
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when listing LFS shares for org [{org_slug}] and space [{space_slug}]: {e}",
+            )
+
+
+def cleanup_lfs_share(org_slug: str, space_slug: str, afsid: int):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.LFSV1Api(api_client)
+        try:
+            return api_instance.cleanup_lfs_share(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                afsid=afsid,
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when cleaning up incomplete multipart uploads for LFS share [{afsid}] in org [{org_slug}] and space [{space_slug}]: {e}",
             )

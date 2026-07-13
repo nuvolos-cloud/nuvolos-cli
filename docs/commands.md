@@ -52,9 +52,10 @@ See [Image Management](image_management.md) for detailed usage.
 ### Image Families
 - `nuvolos image-families list` - List image families
 - `nuvolos image-families create` - Create a new image family
+- `nuvolos image-families update` - Update an existing image family
 
 !!! danger "Permission Required"
-    Creating image families requires the Image Manager role.
+    Creating and updating image families requires the Image Manager role.
     To obtain this role, contact support@nuvolos.cloud.
 
 See [Image Families Management](image_families_management.md) for detailed usage.
@@ -89,6 +90,12 @@ See [Tables Management](tables_management.md) for detailed usage.
 - `nuvolos distribution distribute` - Distribute files, applications, and tables from a snapshot to target instances
 
 See [Distribution Management](distribution_management.md) for detailed usage.
+
+### LFS Management
+- `nuvolos lfs list` - List LFS shares attached to a space
+- `nuvolos lfs cleanup` - Remove incomplete multipart uploads to an LFS share
+
+See [LFS Management](lfs_management.md) for detailed usage.
 
 ### Task Management
 - `nuvolos tasks get` - Get status of a task by ID

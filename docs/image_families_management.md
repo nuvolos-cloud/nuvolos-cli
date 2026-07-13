@@ -92,6 +92,51 @@ nuvolos image-families create \
   --groups "analytics,visualization,business_intelligence"
 ```
 
+## Updating Image Families
+
+The `nuvolos image-families update` command allows you to modify an existing image family record. Only provided fields are updated; others remain unchanged.
+
+!!! danger "Permission Required"
+    Only users with the Image Manager role can update image families.
+    To obtain this role, contact support@nuvolos.cloud.
+
+### Usage
+
+```bash
+nuvolos image-families update IFID [options]
+```
+
+### Arguments
+
+- `IFID`: The image family ID to update (integer)
+
+### Optional Options
+
+- `-n, --name TEXT`: New name for the image family
+- `--icon-url TEXT`: New URL of the icon for the image family
+- `-d, --description TEXT`: New description of the image family
+- `--groups TEXT`: Comma-separated list of group identifiers
+- `--disabled-reason INTEGER`: New disabled reason code for the image family
+- `--priority FLOAT`: New priority for the image family
+- `-f, --format TEXT`: Output format (`tabulated`, `json`, `yaml`)
+
+### Examples
+
+```bash
+# Update the name and description
+nuvolos image-families update 7 \
+  -n "Updated Data Science" \
+  -d "Refreshed description"
+
+# Update the icon URL and groups
+nuvolos image-families update 7 \
+  --icon-url "https://example.com/icons/data-science-v2.png" \
+  --groups "analytics,visualization"
+
+# Update priority
+nuvolos image-families update 7 --priority 3
+```
+
 ## Related Commands
 
 - [Image Management](image_management.md) - Create and manage images
