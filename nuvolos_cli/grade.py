@@ -1,18 +1,16 @@
-"""Instructor assignment testing (NC-3322) — base structure.
+"""Instructor assignment testing and grading.
 
-Option A: ``nuvolos grade check`` calls ``nuvolos_collect.collect``
-in-process, then runs start → wait → execute → stop per student instance via
-existing ``api_client`` (API-key auth).
-
-Deferred (not in this module yet):
-- GPU ``--node-pool`` keep-warm sequencing
-- Credit ``billing_mode`` / course-test billing
+The commands are intended for the instructor application in a teaching
+space. They collect submissions and run the configured validation command in
+each selected student application.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +22,7 @@ from .api_client import (
     execute_command_in_app,
     list_apps,
     list_instances,
+    list_spaces,
     start_app,
     stop_app,
     wait_for_app_running,
@@ -33,7 +32,65 @@ from .logging import clog
 from .utils import _model_to_dict
 
 MANIFEST_FILENAME = "nvcollect_manifest.json"
+TEACHING_SPACE_TYPE = "TEACHING"
 
+
+def _require_nuvolos() -> None:
+    """Reject invocation outside a Nuvolos application environment."""
+    missing = [
+        name
+        for name in ("NUVOLOS_API_KEY", "NUVOLOS_API_HOST")
+        if not Path("/secrets", name).is_file()
+    ]
+    if missing:
+        raise ClickException(
+            "nuvolos grade must run inside a Nuvolos application; "
+            "missing secret file(s): " + ", ".join(missing)
+        )
+
+
+def _require_teaching_master(org_slug: str, space_slug: str) -> None:
+    """Require the current context to be a teaching-space master instance."""
+    try:
+        context = json.loads(os.environ.get("NV_CONTEXT", ""))
+    except json.JSONDecodeError as exc:
+        raise ClickException("NV_CONTEXT must contain valid JSON") from exc
+    if not isinstance(context, dict):
+        raise ClickException("NV_CONTEXT must contain a JSON object")
+
+    context_org = context.get("org_slug") or context.get("org")
+    context_space = context.get("space_slug") or context.get("space")
+    context_instance = context.get("instance_slug") or context.get("instance")
+    if (context_org, context_space) != (org_slug, space_slug):
+        raise ClickException(
+            "nuvolos grade must run in the selected organization and space "
+            "from NV_CONTEXT"
+        )
+    if context_instance != "master":
+        raise ClickException(
+            "nuvolos grade must run from the master instance of a teaching space"
+        )
+
+    spaces = list_spaces(org_slug=org_slug)
+    selected = None
+    for space in spaces:
+        data = _model_to_dict(space) if not isinstance(space, dict) else space
+        if (data.get("slug") or data.get("short_id")) == space_slug:
+            selected = data
+            break
+    if selected is None:
+        raise ClickException(f"Space '{space_slug}' is not visible in organization '{org_slug}'")
+    space_type = str(selected.get("type") or selected.get("space_type") or "").upper()
+    if space_type != TEACHING_SPACE_TYPE:
+        raise ClickException(
+            f"nuvolos grade is only supported in teaching spaces; "
+            f"'{space_slug}' is {space_type or 'unknown'}"
+        )
+
+
+def _validate_grade_environment(org_slug: str, space_slug: str) -> None:
+    _require_nuvolos()
+    _require_teaching_master(org_slug, space_slug)
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -314,6 +371,7 @@ def run_grade_check(
     continue_on_error: bool = False,
     skip_missing_instances: bool = False,
     limit: int | None = None,
+    parallel: int = 1,
 ) -> dict:
     """Orchestrator: optional collect → resolve → lifecycle batch."""
 
@@ -377,6 +435,7 @@ def run_grade_check(
         "skip_collect": skip_collect,
         "instance_filter": instance_filter,
         "dry_run": dry_run,
+        "parallel": parallel,
         "deferred": {
             "gpu_node_pool": "not implemented in base structure",
             "credit_billing_mode": "not implemented in base structure",
@@ -391,30 +450,10 @@ def run_grade_check(
         "students": [],
     }
 
-    for student in students:
+    def process(student):
         slug = student["instance_slug"]
-        if not student["found_in_space"]:
-            msg = (
-                f"Instance '{slug}' not found in org={org_slug} space={space_slug} "
-                "(or API key lacks access)."
-            )
-            if skip_missing_instances or continue_on_error:
-                clog.warning(msg + " Skipping.")
-                rec = {
-                    **student,
-                    "status": "skipped",
-                    "error": msg,
-                    "finished_at": _utc_now_iso(),
-                }
-                summary["students"].append(rec)
-                summary["counts"]["skipped"] += 1
-                continue
-            raise ClickException(msg)
-
         command = expand_command_template(
-            test_command,
-            instance_slug=slug,
-            target=str(student.get("target") or ""),
+            test_command, instance_slug=slug, target=str(student.get("target") or "")
         )
         rec = test_one_student(
             org_slug=org_slug,
@@ -427,21 +466,45 @@ def run_grade_check(
         rec["src"] = student.get("src")
         rec["target"] = student.get("target")
         rec["instance_name"] = student.get("instance_name")
-        summary["students"].append(rec)
+        return rec
 
+    runnable = []
+    for student in students:
+        if student["found_in_space"]:
+            runnable.append(student)
+            continue
+        slug = student["instance_slug"]
+        msg = (
+            f"Instance '{slug}' not found in org={org_slug} space={space_slug} "
+            "(or API key lacks access)."
+        )
+        if not (skip_missing_instances or continue_on_error):
+            raise ClickException(msg)
+        clog.warning(msg + " Skipping.")
+        summary["students"].append({
+            **student, "status": "skipped", "error": msg,
+            "finished_at": _utc_now_iso(),
+        })
+        summary["counts"]["skipped"] += 1
+
+    worker_count = max(1, parallel)
+    if dry_run or worker_count == 1:
+        records = [process(student) for student in runnable]
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [executor.submit(process, student) for student in runnable]
+            records = [future.result() for future in futures]
+
+    for rec in records:
+        summary["students"].append(rec)
         status = rec.get("status")
         if status == "dry_run":
             summary["counts"]["dry_run"] += 1
         elif status == "executed":
             summary["counts"]["ok"] += 1
-        elif status == "skipped":
-            summary["counts"]["skipped"] += 1
         else:
             summary["counts"]["failed"] += 1
-            if not continue_on_error and not dry_run:
-                break
-
-        if not dry_run:
+        if not dry_run and worker_count == 1:
             time.sleep(1)
 
     summary["finished_at"] = _utc_now_iso()
@@ -488,10 +551,8 @@ def nv_grade():
     help="Destination for collected trees + nvcollect_manifest.json.",
 )
 def nv_grade_collect(assignment_name, assignment_folder, target_folder):
-    """Collect submissions by calling nuvolos_collect.collect in-process.
-
-    Requires /files/assignments-review/handin (instructor Nuvolos app mount).
-    """
+    """Collect submissions by calling nuvolos_collect.collect in-process."""
+    _require_nuvolos()
     collect_submissions(assignment_name, assignment_folder, target_folder)
     click.echo(f"Collect completed into {target_folder}")
 
@@ -521,30 +582,21 @@ def nv_grade_collect(assignment_name, assignment_folder, target_folder):
 )
 def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     """Map manifest entries to instance slugs and check space membership."""
+    _validate_grade_environment(org, space)
     check_api_key_configured()
     manifest_data = read_manifest(manifest)
-    students = resolve_students(
-        manifest_data, org, space, instance_filter=instance
-    )
+    students = resolve_students(manifest_data, org, space, instance_filter=instance)
     if fmt == "json":
         click.echo(json.dumps(students, indent=2, default=str))
         return
     rows = [
         [
-            s["instance_slug"],
-            s.get("instance_name") or "",
-            "yes" if s["found_in_space"] else "NO",
-            s.get("target") or "",
+            s["instance_slug"], s.get("instance_name") or "",
+            "yes" if s["found_in_space"] else "NO", s.get("target") or "",
         ]
         for s in students
     ]
-    click.echo(
-        tabulate(
-            rows,
-            headers=["instance_slug", "name", "in_space", "target"],
-            tablefmt="github",
-        )
-    )
+    click.echo(tabulate(rows, headers=["instance_slug", "name", "in_space", "target"], tablefmt="github"))
 
 
 @nv_grade.command("check")
@@ -623,31 +675,24 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     default=None,
     help="Process at most N students (staging POC).",
 )
+@click.option(
+    "--parallel", type=click.IntRange(min=1), default=1, show_default=True,
+    help="Run up to N student checks concurrently.",
+)
+@click.option(
+    "--all", "grade_all", is_flag=True,
+    help="Grade every resolved student; ignores --limit.",
+)
 def nv_grade_check(
-    assignment_name,
-    assignment_folder,
-    target_folder,
-    org,
-    space,
-    instance,
-    app_slug,
-    test_command,
-    results_dir,
-    skip_collect,
-    manifest,
-    dry_run,
-    continue_on_error,
-    skip_missing_instances,
-    limit,
+    assignment_name, assignment_folder, target_folder, org, space, instance,
+    app_slug, test_command, results_dir, skip_collect, manifest, dry_run,
+    continue_on_error, skip_missing_instances, limit, parallel, grade_all,
 ):
-    """Collect (Option A) then test each student instance.
-
-    Base lifecycle per student: start → wait RUNNING → execute → stop.
-    Auth: existing API key only.
-
-    Deferred: GPU --node-pool, credit billing_mode.
-    """
+    """Collect then test each selected student application."""
+    _validate_grade_environment(org, space)
     check_api_key_configured()
+    if grade_all:
+        limit = None
 
     if not skip_collect:
         missing = [
@@ -676,12 +721,12 @@ def nv_grade_check(
         assignment_name=assignment_name,
         assignment_folder=assignment_folder,
         skip_collect=skip_collect,
-        manifest_path=manifest,
+        limit=limit,
+        parallel=parallel,
         instance_filter=instance,
         dry_run=dry_run,
         continue_on_error=continue_on_error,
         skip_missing_instances=skip_missing_instances,
-        limit=limit,
     )
 
     click.echo(json.dumps(summary["counts"], indent=2))
