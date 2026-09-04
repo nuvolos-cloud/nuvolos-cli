@@ -52,6 +52,7 @@ from .utils import (
     get_effective_instance_context,
     get_effective_space_context,
 )
+from .grade import nv_grade
 
 
 @click.group("nuvolos")
@@ -61,6 +62,9 @@ def nuvolos(ctx):
     ctx.ensure_object(dict)
     if "NV_CONTEXT" in os.environ:
         ctx.obj = json.loads(os.environ["NV_CONTEXT"])
+
+
+nuvolos.add_command(nv_grade)
 
 
 @nuvolos.command("config")
