@@ -35,21 +35,6 @@ MANIFEST_FILENAME = "nvcollect_manifest.json"
 TEACHING_SPACE_TYPE = "TEACHING"
 
 
-def _require_nuvolos() -> None:
-    """Reject invocation outside a Nuvolos application environment."""
-    missing = [
-        name
-        for name in ("NUVOLOS_API_KEY", "NUVOLOS_API_HOST")
-        if not Path("/secrets", name).is_file()
-    ]
-    if missing:
-        raise ClickException(
-            "nuvolos grade must run inside a Nuvolos application; "
-            "missing secret file(s): " + ", ".join(missing)
-        )
-    clog.info("Nuvolos environment detected; validating grading context.")
-
-
 def _require_teaching_master(org_slug: str, space_slug: str) -> None:
     """Require the current context to be a teaching-space master instance."""
     try:
@@ -91,8 +76,10 @@ def _require_teaching_master(org_slug: str, space_slug: str) -> None:
 
 
 def _validate_grade_environment(org_slug: str, space_slug: str) -> None:
-    _require_nuvolos()
+    # Same API-key resolution as `nuvolos apps list` and other CLI commands.
+    check_api_key_configured()
     _require_teaching_master(org_slug, space_slug)
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -508,7 +495,7 @@ def nv_grade():
 )
 def nv_grade_collect(assignment_name, assignment_folder, target_folder):
     """Collect submissions by calling nuvolos_collect.collect in-process."""
-    _require_nuvolos()
+    check_api_key_configured()
     collect_submissions(assignment_name, assignment_folder, target_folder)
     click.echo(f"Collect completed into {target_folder}")
 
@@ -539,7 +526,6 @@ def nv_grade_collect(assignment_name, assignment_folder, target_folder):
 def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     """Map manifest entries to instance slugs and check space membership."""
     _validate_grade_environment(org, space)
-    check_api_key_configured()
     manifest_data = read_manifest(manifest)
     students = resolve_students(manifest_data, org, space, instance_filter=instance)
     if fmt == "json":
@@ -646,7 +632,6 @@ def nv_grade_check(
 ):
     """Collect then test each selected student application."""
     _validate_grade_environment(org, space)
-    check_api_key_configured()
     if grade_all:
         limit = None
 
