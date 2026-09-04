@@ -41,6 +41,11 @@ dependencies = [
 dev = [
     "black>=25.1.0",
 ]
+# Option A collect: imports nuvolos_collect. May need nv-collect click pin
+# relaxed to support click>=8 used by nuvolos-cli.
+grade = [
+    "nuvolos_collect @ git+https://github.com/alphacruncher/nv-collect.git",
+]
 
 [tool.setuptools_scm]
 
