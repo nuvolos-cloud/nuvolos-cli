@@ -47,6 +47,7 @@ def _require_nuvolos() -> None:
             "nuvolos grade must run inside a Nuvolos application; "
             "missing secret file(s): " + ", ".join(missing)
         )
+    clog.info("Nuvolos environment detected; validating grading context.")
 
 
 def _require_teaching_master(org_slug: str, space_slug: str) -> None:
@@ -86,6 +87,7 @@ def _require_teaching_master(org_slug: str, space_slug: str) -> None:
             f"nuvolos grade is only supported in teaching spaces; "
             f"'{space_slug}' is {space_type or 'unknown'}"
         )
+    clog.info(f"Validated teaching-space master context: {org_slug}/{space_slug}.")
 
 
 def _validate_grade_environment(org_slug: str, space_slug: str) -> None:
@@ -113,6 +115,10 @@ def collect_submissions(
     target_folder: str,
 ) -> int:
     """Run nvcollect collect() in-process."""
+    clog.info(
+        f"Collecting submissions: assignment={assignment_name!r}, "
+        f"folder={assignment_folder!r}, destination={target_folder}."
+    )
     _require_nuvolos_collect()
     from nuvolos_collect.collect import collect as nv_collect
 
@@ -200,7 +206,12 @@ def resolve_students(
     limit: int | None = None,
 ) -> list[dict]:
     """Map manifest items to instance slugs; verify visibility via instances list."""
+    clog.info(
+        f"Resolving students from manifest for {org_slug}/{space_slug}"
+        + (f" (filter={instance_filter})" if instance_filter else "") + "."
+    )
     instances = list_instances(org_slug=org_slug, space_slug=space_slug)
+    clog.info(f"Found {len(instances)} visible instance(s) in the selected space.")
     by_slug: dict[str, dict] = {}
     for inst in instances:
         d = _model_to_dict(inst) if not isinstance(inst, dict) else inst
@@ -214,24 +225,18 @@ def resolve_students(
         if instance_filter and slug != instance_filter:
             continue
         meta = by_slug.get(slug)
-        students.append(
-            {
-                "index": idx,
-                "instance_slug": slug,
-                "src": item.get("src"),
-                "target": item.get("target"),
-                "instance_name": (meta or {}).get("name"),
-                "found_in_space": meta is not None,
-            }
-        )
+        students.append({
+            "index": idx, "instance_slug": slug, "src": item.get("src"),
+            "target": item.get("target"),
+            "instance_name": (meta or {}).get("name"),
+            "found_in_space": meta is not None,
+        })
 
     if instance_filter and not students:
-        raise ClickException(
-            f"No manifest item matched --instance {instance_filter!r}"
-        )
-
+        raise ClickException(f"No manifest item matched --instance {instance_filter!r}")
     if limit is not None:
         students = students[: max(0, limit)]
+    clog.info(f"Resolved {len(students)} student submission(s).")
     return students
 
 
@@ -258,16 +263,11 @@ def test_one_student(
 ) -> dict:
     """Start → wait RUNNING → execute → stop for one student instance."""
     record = {
-        "instance_slug": instance_slug,
-        "app_slug": app_slug,
-        "command": command,
-        "status": "pending",
-        "started_at": _utc_now_iso(),
-        "execute": None,
-        "error": None,
-        "stopped": None,
+        "instance_slug": instance_slug, "app_slug": app_slug, "command": command,
+        "status": "pending", "started_at": _utc_now_iso(), "execute": None,
+        "error": None, "stopped": None,
     }
-
+    clog.info(f"[{instance_slug}] check queued for app [{app_slug}].")
     if dry_run:
         record["status"] = "dry_run"
         record["finished_at"] = _utc_now_iso()
@@ -278,11 +278,10 @@ def test_one_student(
         return record
 
     if not skip_app_preflight:
+        clog.info(f"[{instance_slug}] checking app availability.")
         apps = list_apps(
-            org_slug=org_slug,
-            space_slug=space_slug,
-            instance_slug=instance_slug,
-            snapshot_slug="development",
+            org_slug=org_slug, space_slug=space_slug,
+            instance_slug=instance_slug, snapshot_slug="development",
         )
         app_slugs = set()
         for a in apps:
@@ -297,36 +296,30 @@ def test_one_student(
                 f"Available: {sorted(app_slugs)}"
             )
             record["finished_at"] = _utc_now_iso()
+            clog.error(f"[{instance_slug}] app preflight failed: {record['error']}")
             return record
 
     started = False
     try:
-        clog.info(f"Starting app [{app_slug}] on instance [{instance_slug}]...")
-        # GPU node_pool deferred; credit billing_mode deferred
+        clog.info(f"[{instance_slug}] starting app [{app_slug}] (1/4).")
         start_app(
-            org_slug=org_slug,
-            space_slug=space_slug,
-            instance_slug=instance_slug,
-            app_slug=app_slug,
-            node_pool=None,
+            org_slug=org_slug, space_slug=space_slug, instance_slug=instance_slug,
+            app_slug=app_slug, node_pool=None,
         )
         started = True
         wait_for_app_running(
-            org_slug=org_slug,
-            space_slug=space_slug,
-            instance_slug=instance_slug,
-            app_slug=app_slug,
+            org_slug=org_slug, space_slug=space_slug,
+            instance_slug=instance_slug, app_slug=app_slug,
         )
-        clog.info(f"Executing test command on [{instance_slug}]...")
+        clog.info(f"[{instance_slug}] app is running (2/4).")
+        clog.info(f"[{instance_slug}] executing validation command (3/4).")
         exec_result = execute_command_in_app(
-            org_slug=org_slug,
-            space_slug=space_slug,
-            instance_slug=instance_slug,
-            app_slug=app_slug,
-            command=command,
+            org_slug=org_slug, space_slug=space_slug,
+            instance_slug=instance_slug, app_slug=app_slug, command=command,
         )
         record["execute"] = _serialize_execute_result(exec_result)
         record["status"] = "executed"
+        clog.info(f"[{instance_slug}] validation command accepted (4/4).")
     except Exception as exc:
         record["status"] = "failed"
         record["error"] = str(exc)
@@ -334,47 +327,38 @@ def test_one_student(
     finally:
         if started:
             try:
-                clog.info(
-                    f"Stopping app [{app_slug}] on instance [{instance_slug}]..."
-                )
+                clog.info(f"[{instance_slug}] stopping app [{app_slug}].")
                 stop_app(
-                    org_slug=org_slug,
-                    space_slug=space_slug,
-                    instance_slug=instance_slug,
-                    app_slug=app_slug,
+                    org_slug=org_slug, space_slug=space_slug,
+                    instance_slug=instance_slug, app_slug=app_slug,
                 )
                 record["stopped"] = True
             except Exception as stop_exc:
                 record["stopped"] = False
                 record["stop_error"] = str(stop_exc)
-                clog.error(
-                    f"Failed to stop app [{app_slug}] on [{instance_slug}]: {stop_exc}"
-                )
+                clog.error(f"Failed to stop app [{app_slug}] on [{instance_slug}]: {stop_exc}")
         record["finished_at"] = _utc_now_iso()
+        clog.info(
+            f"[{instance_slug}] finished: status={record['status']}, "
+            f"stopped={record['stopped']}."
+        )
     return record
 
 
 def run_grade_check(
-    *,
-    org_slug: str,
-    space_slug: str,
-    app_slug: str,
-    test_command: str,
-    results_dir: str,
-    target_folder: str | None = None,
-    assignment_name: str | None = None,
-    assignment_folder: str | None = None,
-    skip_collect: bool = False,
-    manifest_path: str | None = None,
-    instance_filter: str | None = None,
-    dry_run: bool = False,
-    continue_on_error: bool = False,
-    skip_missing_instances: bool = False,
-    limit: int | None = None,
-    parallel: int = 1,
+    *, org_slug: str, space_slug: str, app_slug: str, test_command: str,
+    results_dir: str, target_folder: str | None = None,
+    assignment_name: str | None = None, assignment_folder: str | None = None,
+    skip_collect: bool = False, manifest_path: str | None = None,
+    instance_filter: str | None = None, dry_run: bool = False,
+    continue_on_error: bool = False, skip_missing_instances: bool = False,
+    limit: int | None = None, parallel: int = 1,
 ) -> dict:
     """Orchestrator: optional collect → resolve → lifecycle batch."""
-
+    clog.info(
+        f"Starting grade run for {org_slug}/{space_slug}: app={app_slug}, "
+        f"parallel={max(1, parallel)}, dry_run={dry_run}."
+    )
     if not skip_collect:
         if not assignment_name or not assignment_folder or not target_folder:
             raise ClickException(
@@ -400,72 +384,43 @@ def run_grade_check(
     if skip_collect or not dry_run:
         manifest = read_manifest(manifest_source)
     else:
-        # dry-run with collect: try existing manifest if present, else empty plan
         try:
             manifest = read_manifest(manifest_source)
         except ClickException:
-            clog.warning(
-                "No existing manifest for dry-run without prior collect; "
-                "student list empty until a real collect runs."
-            )
+            clog.warning("No existing manifest for dry-run; student list is empty.")
             manifest = {"meta": {}, "items": []}
 
     students = resolve_students(
-        manifest,
-        org_slug,
-        space_slug,
-        instance_filter=instance_filter,
-        limit=limit,
+        manifest, org_slug, space_slug,
+        instance_filter=instance_filter, limit=limit,
     )
-
+    clog.info(f"Prepared {len(students)} student(s) for grading.")
     results_path = Path(results_dir).expanduser().resolve()
     results_path.mkdir(parents=True, exist_ok=True)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
     summary = {
-        "run_id": run_id,
-        "started_at": _utc_now_iso(),
-        "org_slug": org_slug,
-        "space_slug": space_slug,
-        "app_slug": app_slug,
-        "test_command_template": test_command,
-        "target_folder": target_folder,
-        "assignment_name": assignment_name,
-        "assignment_folder": assignment_folder,
-        "skip_collect": skip_collect,
-        "instance_filter": instance_filter,
-        "dry_run": dry_run,
-        "parallel": parallel,
-        "deferred": {
-            "gpu_node_pool": "not implemented in base structure",
-            "credit_billing_mode": "not implemented in base structure",
-        },
-        "counts": {
-            "total": len(students),
-            "ok": 0,
-            "failed": 0,
-            "skipped": 0,
-            "dry_run": 0,
-        },
+        "run_id": run_id, "started_at": _utc_now_iso(), "org_slug": org_slug,
+        "space_slug": space_slug, "app_slug": app_slug,
+        "test_command_template": test_command, "target_folder": target_folder,
+        "assignment_name": assignment_name, "assignment_folder": assignment_folder,
+        "skip_collect": skip_collect, "instance_filter": instance_filter,
+        "dry_run": dry_run, "parallel": parallel,
+        "counts": {"total": len(students), "ok": 0, "failed": 0, "skipped": 0, "dry_run": 0},
         "students": [],
     }
 
     def process(student):
         slug = student["instance_slug"]
-        command = expand_command_template(
-            test_command, instance_slug=slug, target=str(student.get("target") or "")
-        )
         rec = test_one_student(
-            org_slug=org_slug,
-            space_slug=space_slug,
-            instance_slug=slug,
+            org_slug=org_slug, space_slug=space_slug, instance_slug=slug,
             app_slug=app_slug,
-            command=command,
+            command=expand_command_template(
+                test_command, instance_slug=slug, target=str(student.get("target") or "")
+            ),
             dry_run=dry_run,
         )
-        rec["src"] = student.get("src")
-        rec["target"] = student.get("target")
-        rec["instance_name"] = student.get("instance_name")
+        rec.update({"src": student.get("src"), "target": student.get("target"),
+                    "instance_name": student.get("instance_name")})
         return rec
 
     runnable = []
@@ -474,20 +429,19 @@ def run_grade_check(
             runnable.append(student)
             continue
         slug = student["instance_slug"]
-        msg = (
-            f"Instance '{slug}' not found in org={org_slug} space={space_slug} "
-            "(or API key lacks access)."
-        )
+        msg = f"Instance '{slug}' not found in org={org_slug} space={space_slug} (or API key lacks access)."
         if not (skip_missing_instances or continue_on_error):
             raise ClickException(msg)
         clog.warning(msg + " Skipping.")
-        summary["students"].append({
-            **student, "status": "skipped", "error": msg,
-            "finished_at": _utc_now_iso(),
-        })
+        summary["students"].append({**student, "status": "skipped", "error": msg,
+                                     "finished_at": _utc_now_iso()})
         summary["counts"]["skipped"] += 1
 
     worker_count = max(1, parallel)
+    clog.info(
+        f"Processing {len(runnable)} runnable student(s) with {worker_count} worker(s); "
+        f"{summary['counts']['skipped']} skipped."
+    )
     if dry_run or worker_count == 1:
         records = [process(student) for student in runnable]
     else:
@@ -504,6 +458,11 @@ def run_grade_check(
             summary["counts"]["ok"] += 1
         else:
             summary["counts"]["failed"] += 1
+        clog.info(
+            f"Grade progress: {len(summary['students'])}/{len(students)} completed "
+            f"(ok={summary['counts']['ok']}, failed={summary['counts']['failed']}, "
+            f"skipped={summary['counts']['skipped']})."
+        )
         if not dry_run and worker_count == 1:
             time.sleep(1)
 
@@ -512,7 +471,11 @@ def run_grade_check(
     with out_file.open("w", encoding="utf-8") as fh:
         json.dump(summary, fh, indent=2, default=str)
     summary["results_file"] = str(out_file)
-    clog.info(f"Wrote grade run summary to {out_file}")
+    clog.info(
+        f"Grade run complete: ok={summary['counts']['ok']}, "
+        f"failed={summary['counts']['failed']}, skipped={summary['counts']['skipped']}, "
+        f"results={out_file}."
+    )
     return summary
 
 
@@ -523,14 +486,7 @@ def run_grade_check(
 
 @click.group("grade")
 def nv_grade():
-    """Student assignment testing / grading (instructor).
-
-    Uses the same API key as other nuvolos commands
-    (``nuvolos config --api-key`` / ``NUVOLOS_API_KEY``).
-
-    Primary flow (Option A): collect via nuvolos_collect, then test each
-    student instance with apps start/execute/stop.
-    """
+    """Student assignment testing / grading (instructor)."""
 
 
 @nv_grade.command("collect")
