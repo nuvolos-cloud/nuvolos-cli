@@ -19,17 +19,23 @@ from click import ClickException
 from tabulate import tabulate
 
 from .api_client import (
+    distribute_content,
     execute_command_in_app,
     list_apps,
+    list_files,
     list_instances,
     list_spaces,
     start_app,
     stop_app,
     wait_for_app_running,
+    wait_for_task,
 )
 from .config import check_api_key_configured
 from .logging import clog
 from .utils import _model_to_dict
+
+import shutil
+import shlex
 
 MANIFEST_FILENAME = "nvcollect_manifest.json"
 TEACHING_SPACE_TYPE = "TEACHING"
@@ -238,6 +244,281 @@ def _serialize_execute_result(result) -> dict:
         return {"raw": str(result)}
 
 
+def _files_area_rel(path: str | None) -> str | None:
+    """Convert /files/... app path to files-area relative path for list_files."""
+    if not path:
+        return None
+    p = str(path).strip()
+    for prefix in ("/files/", "files/"):
+        if p.startswith(prefix):
+            return p[len(prefix) :]
+    return p.lstrip("/")
+
+
+def _instructor_instance_slug() -> str:
+    try:
+        context = json.loads(os.environ.get("NV_CONTEXT", "") or "{}")
+    except json.JSONDecodeError:
+        context = {}
+    if isinstance(context, dict):
+        return (
+            context.get("instance_slug")
+            or context.get("instance")
+            or "master"
+        )
+    return "master"
+
+
+def _task_id(task) -> int | None:
+    if task is None:
+        return None
+    d = _model_to_dict(task) if not isinstance(task, dict) else task
+    for key in ("tkid", "id", "task_id"):
+        val = d.get(key)
+        if val is not None:
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _wait_for_files_area_path(
+    *,
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    rel_path: str,
+    timeout_secs: int = 90,
+    stable_rounds: int = 2,
+) -> bool:
+    """Poll files list until path exists and size is stable (execute completion)."""
+    start = time.time()
+    last_size = None
+    stable = 0
+    parent = str(Path(rel_path).parent).replace("\\", "/")
+    name = Path(rel_path).name
+    if parent in (".", ""):
+        parent = ""
+    while time.time() - start < timeout_secs:
+        try:
+            entries = list_files(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                snapshot_slug="development",
+                area="files",
+                local_path=parent or None,
+            )
+        except Exception as exc:
+            clog.debug(f"list_files poll failed for {rel_path}: {exc}")
+            time.sleep(2)
+            continue
+        size = None
+        for entry in entries or []:
+            d = _model_to_dict(entry) if not isinstance(entry, dict) else entry
+            short = d.get("short_id") or d.get("name") or d.get("slug") or ""
+            os_path = str(d.get("os_path") or d.get("path") or "")
+            if short == name or os_path.endswith(rel_path) or os_path.endswith(name):
+                size = d.get("size")
+                if size is None:
+                    size = d.get("storage_used")
+                break
+        if size is not None:
+            if size == last_size:
+                stable += 1
+                if stable >= stable_rounds:
+                    return True
+            else:
+                stable = 0
+                last_size = size
+        time.sleep(2)
+    return False
+
+
+def _read_text_if_exists(path: Path, max_bytes: int = 512_000) -> str | None:
+    try:
+        if not path.is_file():
+            return None
+        data = path.read_bytes()[:max_bytes]
+        return data.decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def pull_student_logs_to_instructor(
+    *,
+    org_slug: str,
+    space_slug: str,
+    student_instance_slug: str,
+    app_slug: str,
+    execute_info: dict,
+    run_id: str,
+    results_dir: Path,
+    instructor_instance_slug: str = "master",
+) -> dict:
+    """Copy execute logs from student instance onto instructor instance + results_dir.
+
+    1) Stage unique copies under /files/grade_results/{run_id}/{student}/ on student
+    2) Distribute those files to instructor (master) development snapshot
+    3) Copy into local results_dir/{student}/ on instructor FS
+    """
+    pull = {
+        "status": "pending",
+        "staging_dir": None,
+        "instructor_paths": {},
+        "local_paths": {},
+        "log_excerpts": {},
+        "error": None,
+    }
+    out_p = execute_info.get("output_path")
+    err_p = execute_info.get("error_path")
+    meta_p = execute_info.get("metadata_path")
+    if not out_p and not err_p:
+        pull["status"] = "skipped"
+        pull["error"] = "execute result had no output/error paths"
+        return pull
+
+    # Wait for default execute redirects to land
+    for label, abs_path in (("output", out_p), ("error", err_p), ("metadata", meta_p)):
+        rel = _files_area_rel(abs_path)
+        if not rel:
+            continue
+        ok = _wait_for_files_area_path(
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=student_instance_slug,
+            rel_path=rel,
+            timeout_secs=90,
+        )
+        if not ok:
+            clog.warning(
+                f"[{student_instance_slug}] timed out waiting for {label} log at {abs_path}"
+            )
+
+    staging_dir = f"/files/grade_results/{run_id}/{student_instance_slug}"
+    pull["staging_dir"] = staging_dir
+    parts = [f"mkdir -p {shlex.quote(staging_dir)}"]
+    if out_p:
+        parts.append(
+            f"cp -f {shlex.quote(out_p)} {shlex.quote(staging_dir + '/output.log')}"
+        )
+    if err_p:
+        parts.append(
+            f"cp -f {shlex.quote(err_p)} {shlex.quote(staging_dir + '/error.log')}"
+        )
+    if meta_p:
+        parts.append(
+            f"cp -f {shlex.quote(meta_p)} {shlex.quote(staging_dir + '/metadata.json')}"
+        )
+    parts.append(f"ls -la {shlex.quote(staging_dir)}")
+    stage_cmd = " && ".join(parts)
+
+    try:
+        clog.info(
+            f"[{student_instance_slug}] staging logs under {staging_dir} for instructor pull."
+        )
+        execute_command_in_app(
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=student_instance_slug,
+            app_slug=app_slug,
+            command=stage_cmd,
+        )
+        # brief wait for stage copies
+        _wait_for_files_area_path(
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=student_instance_slug,
+            rel_path=_files_area_rel(staging_dir + "/output.log") or "grade_results",
+            timeout_secs=60,
+        )
+
+        source_files = []
+        for name in ("output.log", "error.log", "metadata.json"):
+            source_files.append(f"{staging_dir}/{name}")
+
+        clog.info(
+            f"[{student_instance_slug}] distributing logs to instructor "
+            f"instance [{instructor_instance_slug}]."
+        )
+        task = distribute_content(
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=student_instance_slug,
+            snapshot_slug="development",
+            target_instances=[
+                {
+                    "org_slug": org_slug,
+                    "space_slug": space_slug,
+                    "instance_slug": instructor_instance_slug,
+                }
+            ],
+            source_files=source_files,
+            auto_snapshot=False,
+            notify_target_users=False,
+        )
+        tkid = _task_id(task)
+        if tkid is not None:
+            wait_for_task(tkid)
+        else:
+            clog.warning(
+                f"[{student_instance_slug}] distribute returned no tkid; "
+                "waiting briefly for FS sync."
+            )
+            time.sleep(5)
+
+        # On instructor FS after distribute, same paths under /files/...
+        local_dir = results_dir / student_instance_slug
+        local_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("output.log", "error.log", "metadata.json"):
+            instructor_path = Path(staging_dir) / name
+            # allow short FS settle
+            for _ in range(15):
+                if instructor_path.is_file():
+                    break
+                time.sleep(1)
+            pull["instructor_paths"][name] = str(instructor_path)
+            if instructor_path.is_file():
+                dest = local_dir / name
+                shutil.copy2(instructor_path, dest)
+                pull["local_paths"][name] = str(dest)
+                if name.endswith(".log"):
+                    pull["log_excerpts"][name] = _read_text_if_exists(dest)
+            else:
+                clog.warning(
+                    f"[{student_instance_slug}] expected instructor file missing: "
+                    f"{instructor_path}"
+                )
+
+        if pull["local_paths"]:
+            pull["status"] = "pulled"
+            # convenience combined view
+            summary_txt = local_dir / "combined.txt"
+            chunks = []
+            for name in ("output.log", "error.log"):
+                text = pull["log_excerpts"].get(name)
+                if text is not None:
+                    chunks.append(f"===== {name} =====\n{text}")
+            if chunks:
+                summary_txt.write_text("\n\n".join(chunks), encoding="utf-8")
+                pull["local_paths"]["combined.txt"] = str(summary_txt)
+            clog.info(
+                f"[{student_instance_slug}] logs saved under {local_dir}"
+            )
+        else:
+            pull["status"] = "failed"
+            pull["error"] = (
+                "Distribute finished but logs not visible on instructor FS yet. "
+                f"Check {staging_dir} on master after a refresh."
+            )
+    except Exception as exc:
+        pull["status"] = "failed"
+        pull["error"] = str(exc)
+        clog.error(f"[{student_instance_slug}] log pull failed: {exc}")
+    return pull
+
+
 def test_one_student(
     *,
     org_slug: str,
@@ -247,12 +528,22 @@ def test_one_student(
     command: str,
     dry_run: bool = False,
     skip_app_preflight: bool = False,
+    run_id: str | None = None,
+    results_dir: Path | None = None,
+    instructor_instance_slug: str = "master",
+    pull_logs: bool = True,
 ) -> dict:
-    """Start → wait RUNNING → execute → stop for one student instance."""
+    """Start → wait RUNNING → execute → pull logs to instructor → stop."""
     record = {
-        "instance_slug": instance_slug, "app_slug": app_slug, "command": command,
-        "status": "pending", "started_at": _utc_now_iso(), "execute": None,
-        "error": None, "stopped": None,
+        "instance_slug": instance_slug,
+        "app_slug": app_slug,
+        "command": command,
+        "status": "pending",
+        "started_at": _utc_now_iso(),
+        "execute": None,
+        "instructor_logs": None,
+        "error": None,
+        "stopped": None,
     }
     clog.info(f"[{instance_slug}] check queued for app [{app_slug}].")
     if dry_run:
@@ -262,13 +553,20 @@ def test_one_student(
             f"[dry-run] would start/execute/stop app={app_slug} "
             f"on {org_slug}/{space_slug}/{instance_slug}: {command!r}"
         )
+        if pull_logs:
+            clog.info(
+                f"[dry-run] would pull execute logs to instructor "
+                f"[{instructor_instance_slug}] and {results_dir}"
+            )
         return record
 
     if not skip_app_preflight:
         clog.info(f"[{instance_slug}] checking app availability.")
         apps = list_apps(
-            org_slug=org_slug, space_slug=space_slug,
-            instance_slug=instance_slug, snapshot_slug="development",
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=instance_slug,
+            snapshot_slug="development",
         )
         app_slugs = set()
         for a in apps:
@@ -288,25 +586,58 @@ def test_one_student(
 
     started = False
     try:
-        clog.info(f"[{instance_slug}] starting app [{app_slug}] (1/4).")
+        clog.info(f"[{instance_slug}] starting app [{app_slug}] (1/5).")
         start_app(
-            org_slug=org_slug, space_slug=space_slug, instance_slug=instance_slug,
-            app_slug=app_slug, node_pool=None,
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=instance_slug,
+            app_slug=app_slug,
+            node_pool=None,
         )
         started = True
         wait_for_app_running(
-            org_slug=org_slug, space_slug=space_slug,
-            instance_slug=instance_slug, app_slug=app_slug,
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=instance_slug,
+            app_slug=app_slug,
         )
-        clog.info(f"[{instance_slug}] app is running (2/4).")
-        clog.info(f"[{instance_slug}] executing validation command (3/4).")
+        clog.info(f"[{instance_slug}] app is running (2/5).")
+        clog.info(f"[{instance_slug}] executing command (3/5): {command!r}")
         exec_result = execute_command_in_app(
-            org_slug=org_slug, space_slug=space_slug,
-            instance_slug=instance_slug, app_slug=app_slug, command=command,
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=instance_slug,
+            app_slug=app_slug,
+            command=command,
         )
         record["execute"] = _serialize_execute_result(exec_result)
         record["status"] = "executed"
-        clog.info(f"[{instance_slug}] validation command accepted (4/4).")
+        clog.info(f"[{instance_slug}] command accepted (4/5).")
+
+        if pull_logs and results_dir is not None and run_id:
+            clog.info(f"[{instance_slug}] pulling logs to instructor (5/5).")
+            record["instructor_logs"] = pull_student_logs_to_instructor(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                student_instance_slug=instance_slug,
+                app_slug=app_slug,
+                execute_info=record["execute"] or {},
+                run_id=run_id,
+                results_dir=results_dir,
+                instructor_instance_slug=instructor_instance_slug,
+            )
+            # surface excerpt in CLI log
+            excerpts = (record["instructor_logs"] or {}).get("log_excerpts") or {}
+            out_ex = excerpts.get("output.log")
+            err_ex = excerpts.get("error.log")
+            if out_ex:
+                clog.info(
+                    f"[{instance_slug}] stdout (excerpt):\n{out_ex[:2000]}"
+                )
+            if err_ex:
+                clog.info(
+                    f"[{instance_slug}] stderr (excerpt):\n{err_ex[:2000]}"
+                )
     except Exception as exc:
         record["status"] = "failed"
         record["error"] = str(exc)
@@ -316,14 +647,18 @@ def test_one_student(
             try:
                 clog.info(f"[{instance_slug}] stopping app [{app_slug}].")
                 stop_app(
-                    org_slug=org_slug, space_slug=space_slug,
-                    instance_slug=instance_slug, app_slug=app_slug,
+                    org_slug=org_slug,
+                    space_slug=space_slug,
+                    instance_slug=instance_slug,
+                    app_slug=app_slug,
                 )
                 record["stopped"] = True
             except Exception as stop_exc:
                 record["stopped"] = False
                 record["stop_error"] = str(stop_exc)
-                clog.error(f"Failed to stop app [{app_slug}] on [{instance_slug}]: {stop_exc}")
+                clog.error(
+                    f"Failed to stop app [{app_slug}] on [{instance_slug}]: {stop_exc}"
+                )
         record["finished_at"] = _utc_now_iso()
         clog.info(
             f"[{instance_slug}] finished: status={record['status']}, "
@@ -333,18 +668,32 @@ def test_one_student(
 
 
 def run_grade_check(
-    *, org_slug: str, space_slug: str, app_slug: str, test_command: str,
-    results_dir: str, target_folder: str | None = None,
-    assignment_name: str | None = None, assignment_folder: str | None = None,
-    skip_collect: bool = False, manifest_path: str | None = None,
-    instance_filter: str | None = None, dry_run: bool = False,
-    continue_on_error: bool = False, skip_missing_instances: bool = False,
-    limit: int | None = None, parallel: int = 1,
+    *,
+    org_slug: str,
+    space_slug: str,
+    app_slug: str,
+    command: str,
+    results_dir: str,
+    target_folder: str | None = None,
+    assignment_name: str | None = None,
+    assignment_folder: str | None = None,
+    skip_collect: bool = False,
+    manifest_path: str | None = None,
+    instance_filter: str | None = None,
+    dry_run: bool = False,
+    continue_on_error: bool = False,
+    skip_missing_instances: bool = False,
+    limit: int | None = None,
+    parallel: int = 1,
+    pull_logs: bool = True,
+    instructor_instance_slug: str | None = None,
 ) -> dict:
-    """Orchestrator: optional collect → resolve → lifecycle batch."""
+    """Orchestrator: optional collect → resolve → lifecycle batch → instructor logs."""
+    instructor_instance_slug = instructor_instance_slug or _instructor_instance_slug()
     clog.info(
         f"Starting grade run for {org_slug}/{space_slug}: app={app_slug}, "
-        f"parallel={max(1, parallel)}, dry_run={dry_run}."
+        f"parallel={max(1, parallel)}, dry_run={dry_run}, pull_logs={pull_logs}, "
+        f"instructor_instance={instructor_instance_slug}."
     )
     if not skip_collect:
         if not assignment_name or not assignment_folder or not target_folder:
@@ -378,36 +727,71 @@ def run_grade_check(
             manifest = {"meta": {}, "items": []}
 
     students = resolve_students(
-        manifest, org_slug, space_slug,
-        instance_filter=instance_filter, limit=limit,
+        manifest,
+        org_slug,
+        space_slug,
+        instance_filter=instance_filter,
+        limit=limit,
     )
     clog.info(f"Prepared {len(students)} student(s) for grading.")
     results_path = Path(results_dir).expanduser().resolve()
     results_path.mkdir(parents=True, exist_ok=True)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_results_dir = results_path / run_id
+    run_results_dir.mkdir(parents=True, exist_ok=True)
+
     summary = {
-        "run_id": run_id, "started_at": _utc_now_iso(), "org_slug": org_slug,
-        "space_slug": space_slug, "app_slug": app_slug,
-        "test_command_template": test_command, "target_folder": target_folder,
-        "assignment_name": assignment_name, "assignment_folder": assignment_folder,
-        "skip_collect": skip_collect, "instance_filter": instance_filter,
-        "dry_run": dry_run, "parallel": parallel,
-        "counts": {"total": len(students), "ok": 0, "failed": 0, "skipped": 0, "dry_run": 0},
+        "run_id": run_id,
+        "started_at": _utc_now_iso(),
+        "org_slug": org_slug,
+        "space_slug": space_slug,
+        "app_slug": app_slug,
+        "command_template": command,
+        "target_folder": target_folder,
+        "assignment_name": assignment_name,
+        "assignment_folder": assignment_folder,
+        "skip_collect": skip_collect,
+        "instance_filter": instance_filter,
+        "dry_run": dry_run,
+        "parallel": parallel,
+        "pull_logs": pull_logs,
+        "instructor_instance_slug": instructor_instance_slug,
+        "results_run_dir": str(run_results_dir),
+        "counts": {
+            "total": len(students),
+            "ok": 0,
+            "failed": 0,
+            "skipped": 0,
+            "dry_run": 0,
+        },
         "students": [],
     }
 
     def process(student):
         slug = student["instance_slug"]
         rec = test_one_student(
-            org_slug=org_slug, space_slug=space_slug, instance_slug=slug,
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=slug,
             app_slug=app_slug,
             command=expand_command_template(
-                test_command, instance_slug=slug, target=str(student.get("target") or "")
+                command,
+                instance_slug=slug,
+                target=str(student.get("target") or ""),
             ),
             dry_run=dry_run,
+            run_id=run_id,
+            results_dir=run_results_dir,
+            instructor_instance_slug=instructor_instance_slug,
+            pull_logs=pull_logs,
         )
-        rec.update({"src": student.get("src"), "target": student.get("target"),
-                    "instance_name": student.get("instance_name")})
+        rec.update(
+            {
+                "src": student.get("src"),
+                "target": student.get("target"),
+                "instance_name": student.get("instance_name"),
+            }
+        )
         return rec
 
     runnable = []
@@ -533,12 +917,20 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
         return
     rows = [
         [
-            s["instance_slug"], s.get("instance_name") or "",
-            "yes" if s["found_in_space"] else "NO", s.get("target") or "",
+            s["instance_slug"],
+            s.get("instance_name") or "",
+            "yes" if s["found_in_space"] else "NO",
+            s.get("target") or "",
         ]
         for s in students
     ]
-    click.echo(tabulate(rows, headers=["instance_slug", "name", "in_space", "target"], tablefmt="github"))
+    click.echo(
+        tabulate(
+            rows,
+            headers=["instance_slug", "name", "in_space", "target"],
+            tablefmt="github",
+        )
+    )
 
 
 @nv_grade.command("check")
@@ -573,20 +965,32 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     help="Application slug to start on each student instance.",
 )
 @click.option(
-    "--test-command",
+    "--command",
     "-c",
+    "command",
     required=True,
     help=(
-        "Command for apps execute. "
+        "Shell command to run inside each student app (cwd=/files). "
+        "Example: 'python assignments/main.py'. "
         "Placeholders: {instance_slug}, {instance}, {target}."
     ),
+)
+@click.option(
+    "--test-command",
+    "legacy_test_command",
+    default=None,
+    hidden=True,
+    help="Deprecated alias for --command.",
 )
 @click.option(
     "--results-dir",
     "-r",
     required=True,
     type=click.Path(),
-    help="Directory for grade_run_*.json summaries.",
+    help=(
+        "Instructor-side directory for grade_run_*.json and per-student "
+        "output.log / error.log (under results-dir/<run_id>/<instance>/)."
+    ),
 )
 @click.option(
     "--skip-collect",
@@ -618,22 +1022,61 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     help="Process at most N students (staging POC).",
 )
 @click.option(
-    "--parallel", type=click.IntRange(min=1), default=1, show_default=True,
+    "--parallel",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
     help="Run up to N student checks concurrently.",
 )
 @click.option(
-    "--all", "grade_all", is_flag=True,
+    "--all",
+    "grade_all",
+    is_flag=True,
     help="Grade every resolved student; ignores --limit.",
 )
+@click.option(
+    "--pull-logs/--no-pull-logs",
+    default=True,
+    show_default=True,
+    help=(
+        "After execute, copy output/error logs from each student instance "
+        "onto the instructor instance and into --results-dir."
+    ),
+)
+@click.option(
+    "--instructor-instance",
+    default=None,
+    help="Instructor instance slug to receive logs (default: NV_CONTEXT instance or 'master').",
+)
 def nv_grade_check(
-    assignment_name, assignment_folder, target_folder, org, space, instance,
-    app_slug, test_command, results_dir, skip_collect, manifest, dry_run,
-    continue_on_error, skip_missing_instances, limit, parallel, grade_all,
+    assignment_name,
+    assignment_folder,
+    target_folder,
+    org,
+    space,
+    instance,
+    app_slug,
+    command,
+    legacy_test_command,
+    results_dir,
+    skip_collect,
+    manifest,
+    dry_run,
+    continue_on_error,
+    skip_missing_instances,
+    limit,
+    parallel,
+    grade_all,
+    pull_logs,
+    instructor_instance,
 ):
-    """Collect then test each selected student application."""
+    """Collect, run --command on each student app, pull logs to instructor."""
     _validate_grade_environment(org, space)
     if grade_all:
         limit = None
+    run_command = command or legacy_test_command
+    if not run_command:
+        raise ClickException("--command is required (or deprecated --test-command)")
 
     if not skip_collect:
         missing = [
@@ -647,7 +1090,7 @@ def nv_grade_check(
         ]
         if missing:
             raise ClickException(
-                "Option A collect requires: "
+                "Collect requires: "
                 + ", ".join(missing)
                 + " (or pass --skip-collect with --manifest)"
             )
@@ -656,22 +1099,26 @@ def nv_grade_check(
         org_slug=org,
         space_slug=space,
         app_slug=app_slug,
-        test_command=test_command,
+        command=run_command,
         results_dir=results_dir,
         target_folder=target_folder,
         assignment_name=assignment_name,
         assignment_folder=assignment_folder,
         skip_collect=skip_collect,
+        manifest_path=manifest,
         limit=limit,
         parallel=parallel,
         instance_filter=instance,
         dry_run=dry_run,
         continue_on_error=continue_on_error,
         skip_missing_instances=skip_missing_instances,
+        pull_logs=pull_logs,
+        instructor_instance_slug=instructor_instance,
     )
 
     click.echo(json.dumps(summary["counts"], indent=2))
     click.echo(f"results_file: {summary.get('results_file')}")
+    click.echo(f"results_run_dir: {summary.get('results_run_dir')}")
 
     if summary["counts"]["failed"] and not dry_run:
         raise ClickException(
