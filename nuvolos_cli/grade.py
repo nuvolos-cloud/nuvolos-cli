@@ -68,32 +68,30 @@ def _wrap_command_with_done_file(
     Nuvolos default capture only keeps the last segment of a command sequence
     and skips defaults entirely when the submitted string contains `>`. Grade
     therefore owns stdout/stderr paths: redirect the validation body itself,
-    then write `.cmd_done` / `.cmd_exit.<code>` without relying on platform
-    output_path/error_path.
+    then write `.cmd_done` / `.cmd_exit.<code>` with POSIX shell only (no
+    Python runtime required in the student app).
     """
     work = str(Path(done_file).parent)
     work_q = shlex.quote(work)
     out_q = shlex.quote(output_log)
     err_q = shlex.quote(error_log)
-    work_literal = json.dumps(work)
-    done_literal = json.dumps(done_file)
-    write_script = (
-        "import pathlib,sys\n"
-        f"work=pathlib.Path({work_literal})\n"
-        "work.mkdir(parents=True, exist_ok=True)\n"
-        "ec=str(sys.argv[1])\n"
-        f"pathlib.Path({done_literal}).write_text(ec)\n"
-        # Avoid single quotes inside the script: shlex.quote wraps with them.
-        '(work / (".cmd_exit." + ec)).write_text(ec)\n'
-    )
-    write_done = f"python -c {shlex.quote(write_script)} \"$ec\""
+    done_q = shlex.quote(done_file)
+    # Marker writes must stay pure shell so RStudio / python3-only / no-Python
+    # images can still signal completion. `.cmd_exit.$ec` is listed via the
+    # files API (name encodes the exit code); content may be empty.
     return (
-        f"mkdir -p {work_q}\n"
+        f"work={work_q}\n"
+        f"done_file={done_q}\n"
+        f"mkdir -p \"$work\"\n"
         f"{{\n{command}\n}} > {out_q} 2> {err_q}\n"
         f"ec=$?\n"
-        f"{write_done}\n"
+        f"printf '%s' \"$ec\" > \"$done_file\"\n"
+        f": > \"$work/.cmd_exit.$ec\"\n"
         f"exit \"$ec\""
     )
+
+
+
 
 
 
@@ -472,8 +470,9 @@ def _wait_for_execute_completion(
     if not ok:
         raise ClickException(
             f"Timed out after {timeout_secs}s waiting for command completion "
-            f"on [{instance_slug}] ({done_file}). App was not stopped early; "
-            f"check the student instance logs."
+            f"on [{instance_slug}] ({done_file}). "
+            f"Will attempt to pull any output/error logs already written "
+            f"before stopping the app."
         )
     exit_code = _parse_exit_code_from_listing(
         org_slug=org_slug,
@@ -831,6 +830,53 @@ def test_one_student(
             return record
 
     started = False
+    logs_pulled = False
+
+    def _try_pull_logs(reason: str) -> None:
+        """Best-effort instructor log pull while the student app is still up."""
+        nonlocal logs_pulled
+        if logs_pulled:
+            return
+        if not pull_logs or results_dir is None or not run_id:
+            return
+        execute_info = record.get("execute") or {}
+        if not execute_info.get("output_path") and not execute_info.get("error_path"):
+            return
+        try:
+            clog.info(
+                f"[{instance_slug}] pulling logs to instructor ({reason})."
+            )
+            record["instructor_logs"] = pull_student_logs_to_instructor(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                student_instance_slug=instance_slug,
+                app_slug=app_slug,
+                execute_info=execute_info,
+                run_id=run_id,
+                results_dir=results_dir,
+                instructor_instance_slug=instructor_instance_slug,
+            )
+            logs_pulled = True
+            excerpts = (record["instructor_logs"] or {}).get("log_excerpts") or {}
+            out_ex = excerpts.get("output.log")
+            err_ex = excerpts.get("error.log")
+            if out_ex:
+                clog.info(
+                    f"[{instance_slug}] stdout (excerpt):\n{out_ex[:2000]}"
+                )
+            if err_ex:
+                clog.info(
+                    f"[{instance_slug}] stderr (excerpt):\n{err_ex[:2000]}"
+                )
+        except Exception as pull_exc:
+            clog.error(
+                f"[{instance_slug}] log pull failed ({reason}): {pull_exc}"
+            )
+            record["instructor_logs"] = {
+                "status": "failed",
+                "error": str(pull_exc),
+            }
+
     try:
         clog.info(f"[{instance_slug}] starting app [{app_slug}] (1/5).")
         start_app(
@@ -893,38 +939,18 @@ def test_one_student(
             record["status"] = "executed"
             clog.info(f"[{instance_slug}] command completed (4/5).")
 
-        # Always attempt log pull after completion (success or nonzero exit)
-        # so instructors can inspect validation output.
-        if pull_logs and results_dir is not None and run_id:
-            clog.info(f"[{instance_slug}] pulling logs to instructor (5/5).")
-            record["instructor_logs"] = pull_student_logs_to_instructor(
-                org_slug=org_slug,
-                space_slug=space_slug,
-                student_instance_slug=instance_slug,
-                app_slug=app_slug,
-                execute_info=record["execute"] or {},
-                run_id=run_id,
-                results_dir=results_dir,
-                instructor_instance_slug=instructor_instance_slug,
-            )
-            # surface excerpt in CLI log
-            excerpts = (record["instructor_logs"] or {}).get("log_excerpts") or {}
-            out_ex = excerpts.get("output.log")
-            err_ex = excerpts.get("error.log")
-            if out_ex:
-                clog.info(
-                    f"[{instance_slug}] stdout (excerpt):\n{out_ex[:2000]}"
-                )
-            if err_ex:
-                clog.info(
-                    f"[{instance_slug}] stderr (excerpt):\n{err_ex[:2000]}"
-                )
+        _try_pull_logs("after command completion")
 
     except Exception as exc:
         record["status"] = "failed"
         record["error"] = str(exc)
         clog.error(f"Student [{instance_slug}] failed: {exc}")
+        # Timeouts / mid-flight failures: salvage any logs already under
+        # grade_results before the app is stopped.
+        _try_pull_logs("after failure/timeout")
     finally:
+        if started and not logs_pulled:
+            _try_pull_logs("before stop")
         if started:
             try:
                 clog.info(f"[{instance_slug}] stopping app [{app_slug}].")
@@ -947,6 +973,8 @@ def test_one_student(
             f"stopped={record['stopped']}."
         )
     return record
+
+
 
 
 def run_grade_check(
