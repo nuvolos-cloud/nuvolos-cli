@@ -41,31 +41,61 @@ MANIFEST_FILENAME = "nvcollect_manifest.json"
 TEACHING_SPACE_TYPE = "TEACHING"
 
 
+def _cmd_work_dir(run_id: str, instance_slug: str) -> str:
+    return f"/files/grade_results/{run_id}/{instance_slug}"
+
+
 def _cmd_done_path(run_id: str, instance_slug: str) -> str:
     """Side-channel completion file written after the student command finishes."""
-    return f"/files/grade_results/{run_id}/{instance_slug}/.cmd_done"
+    return f"{_cmd_work_dir(run_id, instance_slug)}/.cmd_done"
 
 
-def _wrap_command_with_done_file(command: str, done_file: str) -> str:
-    """Append a completion side-channel that does not use shell '>' redirects.
+def _cmd_output_paths(run_id: str, instance_slug: str) -> tuple[str, str]:
+    """Known stdout/stderr paths owned by grade (not platform default redirects)."""
+    base = _cmd_work_dir(run_id, instance_slug)
+    return f"{base}/output.log", f"{base}/error.log"
 
-    Execute is fire-and-forget (202 + log paths). Platform only adds default
-    stdout/stderr redirects when the submitted string has no '>'. Writing the
-    done file via Python keeps that behavior while giving grade a reliable
-    completion signal to wait on before stop/log-pull.
+
+def _wrap_command_with_done_file(
+    command: str,
+    *,
+    done_file: str,
+    output_log: str,
+    error_log: str,
+) -> str:
+    """Run command with explicit redirects, then write a completion/exit marker.
+
+    Nuvolos default capture only keeps the last segment of a command sequence
+    and skips defaults entirely when the submitted string contains `>`. Grade
+    therefore owns stdout/stderr paths: redirect the validation body itself,
+    then write `.cmd_done` / `.cmd_exit.<code>` without relying on platform
+    output_path/error_path.
     """
+    work = str(Path(done_file).parent)
+    work_q = shlex.quote(work)
+    out_q = shlex.quote(output_log)
+    err_q = shlex.quote(error_log)
+    work_literal = json.dumps(work)
     done_literal = json.dumps(done_file)
-    write_done = (
-        "python -c "
-        + shlex.quote(
-            "import pathlib,sys; "
-            f"p=pathlib.Path({done_literal}); "
-            "p.parent.mkdir(parents=True, exist_ok=True); "
-            "p.write_text(str(sys.argv[1]));"
-        )
-        + ' "$?"'
+    write_script = (
+        "import pathlib,sys\n"
+        f"work=pathlib.Path({work_literal})\n"
+        "work.mkdir(parents=True, exist_ok=True)\n"
+        "ec=str(sys.argv[1])\n"
+        f"pathlib.Path({done_literal}).write_text(ec)\n"
+        # Avoid single quotes inside the script: shlex.quote wraps with them.
+        '(work / (".cmd_exit." + ec)).write_text(ec)\n'
     )
-    return f"{{\n{command}\n}}; {write_done}"
+    write_done = f"python -c {shlex.quote(write_script)} \"$ec\""
+    return (
+        f"mkdir -p {work_q}\n"
+        f"{{\n{command}\n}} > {out_q} 2> {err_q}\n"
+        f"ec=$?\n"
+        f"{write_done}\n"
+        f"exit \"$ec\""
+    )
+
+
 
 
 def _require_teaching_master(org_slug: str, space_slug: str) -> None:
@@ -375,6 +405,40 @@ def _wait_for_files_area_path(
     return False
 
 
+def _parse_exit_code_from_listing(
+    *,
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    work_rel: str,
+) -> int | None:
+    """Read `.cmd_exit.<code>` from a files-area listing (no content fetch)."""
+    try:
+        entries = list_files(
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=instance_slug,
+            snapshot_slug="development",
+            area="files",
+            local_path=work_rel or None,
+        )
+    except Exception as exc:
+        clog.debug(f"list_files exit-code probe failed for {work_rel}: {exc}")
+        return None
+    best = None
+    for entry in entries or []:
+        d = _model_to_dict(entry) if not isinstance(entry, dict) else entry
+        short = str(d.get("short_id") or d.get("name") or d.get("slug") or "")
+        if not short.startswith(".cmd_exit."):
+            continue
+        suffix = short[len(".cmd_exit.") :]
+        try:
+            best = int(suffix)
+        except ValueError:
+            continue
+    return best
+
+
 def _wait_for_execute_completion(
     *,
     org_slug: str,
@@ -382,13 +446,16 @@ def _wait_for_execute_completion(
     instance_slug: str,
     done_file: str,
     timeout_secs: int | None = None,
-) -> None:
-    """Block until the command done-file is present and non-empty."""
+) -> int:
+    """Block until the done-file exists; return the validation exit code."""
     if timeout_secs is None:
         timeout_secs = int(os.environ.get("GRADE_EXEC_TIMEOUT_SECS", "600"))
     rel = _files_area_rel(done_file)
     if not rel:
         raise ClickException(f"Invalid done file path: {done_file}")
+    work_rel = str(Path(rel).parent).replace("\\", "/")
+    if work_rel in (".", ""):
+        work_rel = ""
     clog.info(
         f"[{instance_slug}] waiting for command completion via {done_file} "
         f"(timeout={timeout_secs}s)."
@@ -408,7 +475,26 @@ def _wait_for_execute_completion(
             f"on [{instance_slug}] ({done_file}). App was not stopped early; "
             f"check the student instance logs."
         )
-    clog.info(f"[{instance_slug}] command completion signal observed.")
+    exit_code = _parse_exit_code_from_listing(
+        org_slug=org_slug,
+        space_slug=space_slug,
+        instance_slug=instance_slug,
+        work_rel=work_rel,
+    )
+    if exit_code is None:
+        # Done file present but sentinel missing — treat as failure to avoid
+        # false "ok" when the writer partially ran.
+        clog.warning(
+            f"[{instance_slug}] completion file present but no .cmd_exit.<code> "
+            f"sentinel under {work_rel or '/'}; assuming exit_code=1."
+        )
+        exit_code = 1
+    clog.info(
+        f"[{instance_slug}] command completion signal observed (exit_code={exit_code})."
+    )
+    return exit_code
+
+
 
 
 def _files_area_entry_exists(
@@ -510,44 +596,67 @@ def pull_student_logs_to_instructor(
     staging_dir = f"/files/grade_results/{run_id}/{student_instance_slug}"
     pull["staging_dir"] = staging_dir
     staged_names: list[str] = []
-    parts = [f"mkdir -p {shlex.quote(staging_dir)}"]
+    # Validation already wrote grade-owned logs under staging_dir — distribute
+    # those paths directly. Only copy when execute_info points elsewhere
+    # (e.g. platform metadata.json under nuvolos_api_out/).
+    copies: list[tuple[str, str, str]] = []  # (label, src, dest_name)
     if out_p:
-        parts.append(
-            f"cp -f {shlex.quote(out_p)} {shlex.quote(staging_dir + '/output.log')}"
-        )
-        staged_names.append("output.log")
+        if out_p.rstrip("/") == f"{staging_dir}/output.log":
+            staged_names.append("output.log")
+        else:
+            copies.append(("output", out_p, "output.log"))
     if err_p:
-        parts.append(
-            f"cp -f {shlex.quote(err_p)} {shlex.quote(staging_dir + '/error.log')}"
-        )
-        staged_names.append("error.log")
+        if err_p.rstrip("/") == f"{staging_dir}/error.log":
+            staged_names.append("error.log")
+        else:
+            copies.append(("error", err_p, "error.log"))
     if meta_p:
-        parts.append(
-            f"cp -f {shlex.quote(meta_p)} {shlex.quote(staging_dir + '/metadata.json')}"
-        )
-        staged_names.append("metadata.json")
-    parts.append(f"ls -la {shlex.quote(staging_dir)}")
-    stage_cmd = " && ".join(parts)
-    stage_done = f"{staging_dir}/.stage_done"
+        if meta_p.rstrip("/") == f"{staging_dir}/metadata.json":
+            staged_names.append("metadata.json")
+        else:
+            copies.append(("metadata", meta_p, "metadata.json"))
 
     try:
-        clog.info(
-            f"[{student_instance_slug}] staging logs under {staging_dir} for instructor pull."
-        )
-        execute_command_in_app(
-            org_slug=org_slug,
-            space_slug=space_slug,
-            instance_slug=student_instance_slug,
-            app_slug=app_slug,
-            command=_wrap_command_with_done_file(stage_cmd, stage_done),
-        )
-        _wait_for_execute_completion(
-            org_slug=org_slug,
-            space_slug=space_slug,
-            instance_slug=student_instance_slug,
-            done_file=stage_done,
-            timeout_secs=int(os.environ.get("GRADE_STAGE_TIMEOUT_SECS", "120")),
-        )
+        if copies:
+            parts = [f"mkdir -p {shlex.quote(staging_dir)}"]
+            for _label, src, dest_name in copies:
+                parts.append(
+                    f"cp -f {shlex.quote(src)} {shlex.quote(staging_dir + '/' + dest_name)}"
+                )
+                staged_names.append(dest_name)
+            parts.append(f"ls -la {shlex.quote(staging_dir)}")
+            stage_cmd = " && ".join(parts)
+            stage_done = f"{staging_dir}/.stage_done"
+            stage_out = f"{staging_dir}/.stage_out.log"
+            stage_err = f"{staging_dir}/.stage_err.log"
+            clog.info(
+                f"[{student_instance_slug}] staging logs under {staging_dir} for instructor pull."
+            )
+            execute_command_in_app(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=student_instance_slug,
+                app_slug=app_slug,
+                command=_wrap_command_with_done_file(
+                    stage_cmd,
+                    done_file=stage_done,
+                    output_log=stage_out,
+                    error_log=stage_err,
+                ),
+            )
+            _wait_for_execute_completion(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=student_instance_slug,
+                done_file=stage_done,
+                timeout_secs=int(os.environ.get("GRADE_STAGE_TIMEOUT_SECS", "120")),
+            )
+        else:
+            clog.info(
+                f"[{student_instance_slug}] validation logs already under {staging_dir}; "
+                f"skipping stage copy."
+            )
+
 
         # Only distribute files that were requested and actually landed.
         source_files = []
@@ -744,7 +853,13 @@ def test_one_student(
                 f"[{instance_slug}] internal error: run_id required to track command completion."
             )
         done_file = _cmd_done_path(run_id, instance_slug)
-        wrapped_command = _wrap_command_with_done_file(command, done_file)
+        output_log, error_log = _cmd_output_paths(run_id, instance_slug)
+        wrapped_command = _wrap_command_with_done_file(
+            command,
+            done_file=done_file,
+            output_log=output_log,
+            error_log=error_log,
+        )
         clog.info(f"[{instance_slug}] executing command (3/5): {command!r}")
         exec_result = execute_command_in_app(
             org_slug=org_slug,
@@ -754,20 +869,32 @@ def test_one_student(
             command=wrapped_command,
         )
         record["execute"] = _serialize_execute_result(exec_result)
+        # Grade owns these paths (wrapper uses explicit redirects).
+        record["execute"]["output_path"] = output_log
+        record["execute"]["error_path"] = error_log
         record["execute"]["done_file"] = done_file
         record["execute"]["submitted_command"] = command
         # Execute returns 202 immediately; wait for the done-file before
         # treating the run as finished, pulling logs, or stopping the app.
-        _wait_for_execute_completion(
+        exit_code = _wait_for_execute_completion(
             org_slug=org_slug,
             space_slug=space_slug,
             instance_slug=instance_slug,
             done_file=done_file,
         )
-        record["status"] = "executed"
-        clog.info(f"[{instance_slug}] command completed (4/5).")
+        record["execute"]["exit_code"] = exit_code
+        if exit_code != 0:
+            record["status"] = "failed"
+            record["error"] = f"Validation command exited with code {exit_code}"
+            clog.error(
+                f"[{instance_slug}] command failed (4/5): exit_code={exit_code}."
+            )
+        else:
+            record["status"] = "executed"
+            clog.info(f"[{instance_slug}] command completed (4/5).")
 
-
+        # Always attempt log pull after completion (success or nonzero exit)
+        # so instructors can inspect validation output.
         if pull_logs and results_dir is not None and run_id:
             clog.info(f"[{instance_slug}] pulling logs to instructor (5/5).")
             record["instructor_logs"] = pull_student_logs_to_instructor(
@@ -792,6 +919,7 @@ def test_one_student(
                 clog.info(
                     f"[{instance_slug}] stderr (excerpt):\n{err_ex[:2000]}"
                 )
+
     except Exception as exc:
         record["status"] = "failed"
         record["error"] = str(exc)
@@ -963,12 +1091,44 @@ def run_grade_check(
         summary["counts"]["skipped"] += 1
 
     worker_count = max(1, parallel)
+    if not continue_on_error and not dry_run and worker_count > 1:
+        clog.warning(
+            "--continue-on-error is not set; forcing sequential processing so "
+            "the run can stop after the first student failure."
+        )
+        worker_count = 1
     clog.info(
         f"Processing {len(runnable)} runnable student(s) with {worker_count} worker(s); "
-        f"{summary['counts']['skipped']} skipped."
+        f"{summary['counts']['skipped']} skipped; "
+        f"continue_on_error={continue_on_error}."
     )
+    records: list[dict] = []
     if dry_run or worker_count == 1:
-        records = [process(student) for student in runnable]
+        for idx, student in enumerate(runnable):
+            rec = process(student)
+            records.append(rec)
+            failed = rec.get("status") not in ("executed", "dry_run", "skipped")
+            if failed and not continue_on_error and not dry_run:
+                remaining = runnable[idx + 1 :]
+                if remaining:
+                    clog.error(
+                        f"Stopping after failure on [{rec.get('instance_slug')}]; "
+                        f"{len(remaining)} student(s) not processed "
+                        f"(pass --continue-on-error to keep going)."
+                    )
+                for skipped_student in remaining:
+                    records.append(
+                        {
+                            **skipped_student,
+                            "status": "skipped",
+                            "error": (
+                                "Skipped because a previous student failed and "
+                                "--continue-on-error was not set."
+                            ),
+                            "finished_at": _utc_now_iso(),
+                        }
+                    )
+                break
     else:
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = [executor.submit(process, student) for student in runnable]
@@ -981,6 +1141,8 @@ def run_grade_check(
             summary["counts"]["dry_run"] += 1
         elif status == "executed":
             summary["counts"]["ok"] += 1
+        elif status == "skipped":
+            summary["counts"]["skipped"] += 1
         else:
             summary["counts"]["failed"] += 1
         clog.info(
@@ -990,6 +1152,7 @@ def run_grade_check(
         )
         if not dry_run and worker_count == 1:
             time.sleep(1)
+
 
     summary["finished_at"] = _utc_now_iso()
     out_file = results_path / f"grade_run_{run_id}.json"
@@ -1122,7 +1285,8 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     "--command",
     "-c",
     "command",
-    required=True,
+    default=None,
+    required=False,
     help=(
         "Shell command to run inside each student app (cwd=/files). "
         "Example: 'python assignments/main.py'. "
@@ -1162,7 +1326,11 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
 @click.option(
     "--continue-on-error",
     is_flag=True,
-    help="Continue to the next student after a failure.",
+    help=(
+        "Continue to the next student after a lifecycle/validation failure. "
+        "Without this flag the run stops after the first failed student "
+        "(remaining students are marked skipped)."
+    ),
 )
 @click.option(
     "--skip-missing-instances",
