@@ -41,6 +41,33 @@ MANIFEST_FILENAME = "nvcollect_manifest.json"
 TEACHING_SPACE_TYPE = "TEACHING"
 
 
+def _cmd_done_path(run_id: str, instance_slug: str) -> str:
+    """Side-channel completion file written after the student command finishes."""
+    return f"/files/grade_results/{run_id}/{instance_slug}/.cmd_done"
+
+
+def _wrap_command_with_done_file(command: str, done_file: str) -> str:
+    """Append a completion side-channel that does not use shell '>' redirects.
+
+    Execute is fire-and-forget (202 + log paths). Platform only adds default
+    stdout/stderr redirects when the submitted string has no '>'. Writing the
+    done file via Python keeps that behavior while giving grade a reliable
+    completion signal to wait on before stop/log-pull.
+    """
+    done_literal = json.dumps(done_file)
+    write_done = (
+        "python -c "
+        + shlex.quote(
+            "import pathlib,sys; "
+            f"p=pathlib.Path({done_literal}); "
+            "p.parent.mkdir(parents=True, exist_ok=True); "
+            "p.write_text(str(sys.argv[1]));"
+        )
+        + ' "$?"'
+    )
+    return f"{{\n{command}\n}}; {write_done}"
+
+
 def _require_teaching_master(org_slug: str, space_slug: str) -> None:
     """Require the current context to be a teaching-space master instance."""
     try:
@@ -291,8 +318,13 @@ def _wait_for_files_area_path(
     rel_path: str,
     timeout_secs: int = 90,
     stable_rounds: int = 2,
+    require_nonzero_size: bool = True,
 ) -> bool:
-    """Poll files list until path exists and size is stable (execute completion)."""
+    """Poll files list until path exists and size is stable.
+
+    When require_nonzero_size is True (default), size 0 is not treated as
+    complete — empty files can appear while a command is still running.
+    """
     start = time.time()
     last_size = None
     stable = 0
@@ -325,15 +357,91 @@ def _wait_for_files_area_path(
                     size = d.get("storage_used")
                 break
         if size is not None:
-            if size == last_size:
+            try:
+                size_n = int(size)
+            except (TypeError, ValueError):
+                size_n = -1
+            if require_nonzero_size and size_n <= 0:
+                stable = 0
+                last_size = size_n
+            elif size_n == last_size:
                 stable += 1
                 if stable >= stable_rounds:
                     return True
             else:
                 stable = 0
-                last_size = size
+                last_size = size_n
         time.sleep(2)
     return False
+
+
+def _wait_for_execute_completion(
+    *,
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    done_file: str,
+    timeout_secs: int | None = None,
+) -> None:
+    """Block until the command done-file is present and non-empty."""
+    if timeout_secs is None:
+        timeout_secs = int(os.environ.get("GRADE_EXEC_TIMEOUT_SECS", "600"))
+    rel = _files_area_rel(done_file)
+    if not rel:
+        raise ClickException(f"Invalid done file path: {done_file}")
+    clog.info(
+        f"[{instance_slug}] waiting for command completion via {done_file} "
+        f"(timeout={timeout_secs}s)."
+    )
+    ok = _wait_for_files_area_path(
+        org_slug=org_slug,
+        space_slug=space_slug,
+        instance_slug=instance_slug,
+        rel_path=rel,
+        timeout_secs=timeout_secs,
+        stable_rounds=1,
+        require_nonzero_size=True,
+    )
+    if not ok:
+        raise ClickException(
+            f"Timed out after {timeout_secs}s waiting for command completion "
+            f"on [{instance_slug}] ({done_file}). App was not stopped early; "
+            f"check the student instance logs."
+        )
+    clog.info(f"[{instance_slug}] command completion signal observed.")
+
+
+def _files_area_entry_exists(
+    *,
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    rel_path: str,
+) -> bool:
+    parent = str(Path(rel_path).parent).replace("\\", "/")
+    name = Path(rel_path).name
+    if parent in (".", ""):
+        parent = ""
+    try:
+        entries = list_files(
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=instance_slug,
+            snapshot_slug="development",
+            area="files",
+            local_path=parent or None,
+        )
+    except Exception as exc:
+        clog.debug(f"list_files existence check failed for {rel_path}: {exc}")
+        return False
+    for entry in entries or []:
+        d = _model_to_dict(entry) if not isinstance(entry, dict) else entry
+        short = d.get("short_id") or d.get("name") or d.get("slug") or ""
+        os_path = str(d.get("os_path") or d.get("path") or "")
+        if short == name or os_path.endswith(rel_path) or os_path.endswith(name):
+            return True
+    return False
+
 
 
 def _read_text_if_exists(path: Path, max_bytes: int = 512_000) -> str | None:
@@ -379,7 +487,8 @@ def pull_student_logs_to_instructor(
         pull["error"] = "execute result had no output/error paths"
         return pull
 
-    # Wait for default execute redirects to land
+    # Output/error may legitimately be empty; existence is enough once the
+    # command done-file has already been observed by the caller.
     for label, abs_path in (("output", out_p), ("error", err_p), ("metadata", meta_p)):
         rel = _files_area_rel(abs_path)
         if not rel:
@@ -390,6 +499,8 @@ def pull_student_logs_to_instructor(
             instance_slug=student_instance_slug,
             rel_path=rel,
             timeout_secs=90,
+            stable_rounds=1,
+            require_nonzero_size=False,
         )
         if not ok:
             clog.warning(
@@ -398,21 +509,26 @@ def pull_student_logs_to_instructor(
 
     staging_dir = f"/files/grade_results/{run_id}/{student_instance_slug}"
     pull["staging_dir"] = staging_dir
+    staged_names: list[str] = []
     parts = [f"mkdir -p {shlex.quote(staging_dir)}"]
     if out_p:
         parts.append(
             f"cp -f {shlex.quote(out_p)} {shlex.quote(staging_dir + '/output.log')}"
         )
+        staged_names.append("output.log")
     if err_p:
         parts.append(
             f"cp -f {shlex.quote(err_p)} {shlex.quote(staging_dir + '/error.log')}"
         )
+        staged_names.append("error.log")
     if meta_p:
         parts.append(
             f"cp -f {shlex.quote(meta_p)} {shlex.quote(staging_dir + '/metadata.json')}"
         )
+        staged_names.append("metadata.json")
     parts.append(f"ls -la {shlex.quote(staging_dir)}")
     stage_cmd = " && ".join(parts)
+    stage_done = f"{staging_dir}/.stage_done"
 
     try:
         clog.info(
@@ -423,20 +539,41 @@ def pull_student_logs_to_instructor(
             space_slug=space_slug,
             instance_slug=student_instance_slug,
             app_slug=app_slug,
-            command=stage_cmd,
+            command=_wrap_command_with_done_file(stage_cmd, stage_done),
         )
-        # brief wait for stage copies
-        _wait_for_files_area_path(
+        _wait_for_execute_completion(
             org_slug=org_slug,
             space_slug=space_slug,
             instance_slug=student_instance_slug,
-            rel_path=_files_area_rel(staging_dir + "/output.log") or "grade_results",
-            timeout_secs=60,
+            done_file=stage_done,
+            timeout_secs=int(os.environ.get("GRADE_STAGE_TIMEOUT_SECS", "120")),
         )
 
+        # Only distribute files that were requested and actually landed.
         source_files = []
-        for name in ("output.log", "error.log", "metadata.json"):
-            source_files.append(f"{staging_dir}/{name}")
+        for name in staged_names:
+            abs_staged = f"{staging_dir}/{name}"
+            rel_staged = _files_area_rel(abs_staged)
+            if rel_staged and _files_area_entry_exists(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=student_instance_slug,
+                rel_path=rel_staged,
+            ):
+                source_files.append(abs_staged)
+            else:
+                clog.warning(
+                    f"[{student_instance_slug}] staged file missing, skipping distribute: "
+                    f"{abs_staged}"
+                )
+
+        if not source_files:
+            pull["status"] = "failed"
+            pull["error"] = (
+                f"No staged log files found under {staging_dir} after staging command."
+            )
+            return pull
+
 
         clog.info(
             f"[{student_instance_slug}] distributing logs to instructor "
@@ -467,11 +604,11 @@ def pull_student_logs_to_instructor(
                 "waiting briefly for FS sync."
             )
             time.sleep(5)
-
         # On instructor FS after distribute, same paths under /files/...
         local_dir = results_dir / student_instance_slug
         local_dir.mkdir(parents=True, exist_ok=True)
-        for name in ("output.log", "error.log", "metadata.json"):
+        distributed_names = [Path(p).name for p in source_files]
+        for name in distributed_names:
             instructor_path = Path(staging_dir) / name
             # allow short FS settle
             for _ in range(15):
@@ -602,17 +739,34 @@ def test_one_student(
             app_slug=app_slug,
         )
         clog.info(f"[{instance_slug}] app is running (2/5).")
+        if not run_id:
+            raise ClickException(
+                f"[{instance_slug}] internal error: run_id required to track command completion."
+            )
+        done_file = _cmd_done_path(run_id, instance_slug)
+        wrapped_command = _wrap_command_with_done_file(command, done_file)
         clog.info(f"[{instance_slug}] executing command (3/5): {command!r}")
         exec_result = execute_command_in_app(
             org_slug=org_slug,
             space_slug=space_slug,
             instance_slug=instance_slug,
             app_slug=app_slug,
-            command=command,
+            command=wrapped_command,
         )
         record["execute"] = _serialize_execute_result(exec_result)
+        record["execute"]["done_file"] = done_file
+        record["execute"]["submitted_command"] = command
+        # Execute returns 202 immediately; wait for the done-file before
+        # treating the run as finished, pulling logs, or stopping the app.
+        _wait_for_execute_completion(
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=instance_slug,
+            done_file=done_file,
+        )
         record["status"] = "executed"
-        clog.info(f"[{instance_slug}] command accepted (4/5).")
+        clog.info(f"[{instance_slug}] command completed (4/5).")
+
 
         if pull_logs and results_dir is not None and run_id:
             clog.info(f"[{instance_slug}] pulling logs to instructor (5/5).")
