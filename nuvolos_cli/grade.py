@@ -50,11 +50,6 @@ GRADE_META_FILENAME = "grade_meta.json"
 GRADE_ARTIFACTS_DIRNAME = "_grading"
 
 
-
-
-
-
-
 def _as_files_abs_path(path: str | Path) -> str:
     """Normalize a results path to an absolute /files/... path for cross-instance use."""
     p = Path(path).expanduser()
@@ -951,11 +946,15 @@ def _files_area_entry_exists(
 
 
 def _read_text_if_exists(path: Path, max_bytes: int = 5_000_000) -> tuple[str, bool] | None:
-    """Read a text file's contents; returns ``(text, truncated)`` or None if missing."""
+    """Read a text file's contents; returns ``(text, truncated)`` or None if missing.
+
+    Reads at most ``max_bytes + 1`` bytes so large logs are not fully loaded.
+    """
     try:
         if not path.is_file():
             return None
-        data = path.read_bytes()
+        with path.open("rb") as fh:
+            data = fh.read(max_bytes + 1)
         truncated = len(data) > max_bytes
         if truncated:
             data = data[:max_bytes]
@@ -1723,7 +1722,7 @@ def run_grade_check(
                     f"[{rec.get('instance_slug')}] handin publish failed: {exc}"
                 )
             publish_error = (rec.get("handin_publish") or {}).get("error")
-            if publish_error and rec.get("status") == "ok":
+            if publish_error and rec.get("status") == "executed":
                 rec["status"] = "failed"
                 rec["error"] = rec.get("error") or f"publish failed: {publish_error}"
                 summary["counts"]["ok"] -= 1
