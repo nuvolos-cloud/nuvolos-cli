@@ -480,6 +480,11 @@ def _safe_copy_into(src_file: Path, dest_dir: Path, name: str | None = None) -> 
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / (name or src_file.name)
     try:
+        if dest.exists() and (dest.is_file() or dest.is_symlink()):
+            try:
+                dest.unlink()
+            except OSError:
+                pass
         shutil.copy2(src_file, dest)
         return dest
     except OSError as exc:
