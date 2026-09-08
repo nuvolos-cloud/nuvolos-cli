@@ -41,11 +41,12 @@ dependencies = [
 dev = [
     "black>=25.1.0",
 ]
-# Option A collect: imports nuvolos_collect. May need nv-collect click pin
-# relaxed to support click>=8 used by nuvolos-cli.
-grade = [
-    "nuvolos_collect @ git+https://github.com/alphacruncher/nv-collect.git",
-]
+# grade collect needs nuvolos_collect. Do not declare it as a package extra:
+# a git URL in Requires-Dist blocks PyPI upload, and current nv-collect pins
+# click>=7,<8 which conflicts with nuvolos-cli's click>=8.1.7. Install
+# separately when needed:
+#   pip install git+https://github.com/alphacruncher/nv-collect.git
+
 
 [tool.setuptools_scm]
 

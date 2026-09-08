@@ -630,7 +630,9 @@ def update_image(
         try:
             return api_instance.update_image(
                 imid=imid,
-                image_update=ImageUpdate.from_dict(body),
+                # ctor keeps model_fields_set sparse; from_dict() marks all
+                # keys present and serializes omitted nullable fields as null.
+                image_update=ImageUpdate(**body),
                 _headers={"Content-Type": "application/json"},
             )
         except nuvolos_client_api.ApiException as e:
@@ -723,7 +725,9 @@ def update_image_family(
         try:
             return api_instance.update_image_family(
                 ifid=ifid,
-                image_family_update=ImageFamilyUpdate.from_dict(body),
+                # ctor keeps model_fields_set sparse; from_dict() marks all
+                # keys present and serializes omitted nullable fields as null.
+                image_family_update=ImageFamilyUpdate(**body),
                 _headers={"Content-Type": "application/json"},
             )
         except nuvolos_client_api.ApiException as e:
@@ -1024,7 +1028,9 @@ def rename_table(
                 instance_slug=instance_slug,
                 snapshot_slug=snapshot_slug,
                 table_slug=table_slug,
-                table_update=TableUpdate.from_dict(body),
+                # ctor keeps model_fields_set sparse; from_dict() marks all
+                # keys present and serializes omitted nullable fields as null.
+                table_update=TableUpdate(**body),
                 _headers={"Content-Type": "application/json"},
             )
         except nuvolos_client_api.ApiException as e:
