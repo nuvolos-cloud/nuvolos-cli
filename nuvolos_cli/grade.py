@@ -39,21 +39,83 @@ import shlex
 
 MANIFEST_FILENAME = "nvcollect_manifest.json"
 TEACHING_SPACE_TYPE = "TEACHING"
+HANDIN_REVIEW_ROOT = "/files/assignments-review/handin"
+HANDBACK_REVIEW_ROOT = "/files/assignments-review/handback"
+# Ephemeral staging only (execute + distribute). Durable output is handin/handback.
+DEFAULT_GRADE_WORK_ROOT = "/files/.nuvolos_grade"
+GRADE_META_FILENAME = "grade_meta.json"
+# Grading artifacts (output.log, grade_meta.json) are published under a
+# dedicated child directory so they never collide with identically named
+# files already present in a student's submission.
+GRADE_ARTIFACTS_DIRNAME = "_grading"
 
 
-def _cmd_work_dir(run_id: str, instance_slug: str) -> str:
-    return f"/files/grade_results/{run_id}/{instance_slug}"
+def _as_files_abs_path(path: str | Path) -> str:
+    """Normalize a results path to an absolute /files/... path for cross-instance use."""
+    p = Path(path).expanduser()
+    if not p.is_absolute():
+        p = Path("/files") / p
+    text = os.path.normpath(str(p))
+    # Prefer the shared /files mount form (drop resolve()-only host paths).
+    if not text.startswith("/files/") and "/files/" in text:
+        text = "/files/" + text.split("/files/", 1)[1]
+        text = os.path.normpath(text)
+    if text != "/files" and not text.startswith("/files/"):
+        raise ClickException(
+            "results_dir must be under /files for student→instructor log distribution, got: "
+            + text
+        )
+    return text
 
 
-def _cmd_done_path(run_id: str, instance_slug: str) -> str:
+def _safe_student_folder_name(label: str | None, fallback: str) -> str:
+    """Filesystem-safe folder name; prefer email, fall back to instance slug."""
+    raw = (label or "").strip() or fallback
+    # Strip path separators / NULs; keep @ so emails stay readable.
+    cleaned = (
+        raw.replace("\0", "")
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace("\n", "_")
+        .replace("\r", "_")
+        .strip(" .")
+    )
+    return cleaned or fallback
+
+
+def _email_from_instance_meta(meta: dict | None) -> str | None:
+    """Best-effort student email.
+
+    Teaching single-user instances set instance name (long_id) to the invitee
+    email (see nv-backend create_instances_with_single_editor).
+    """
+    if not meta:
+        return None
+    for key in ("email", "user_email", "owner_email"):
+        val = meta.get(key)
+        if val and "@" in str(val):
+            return str(val).strip()
+    name = str(meta.get("name") or "").strip()
+    # Invite flow stores email as the instance display name.
+    if "@" in name and " " not in name and "/" not in name:
+        return name
+    return None
+
+
+def _cmd_work_dir(results_dir: str | Path, run_id: str, student_folder: str) -> str:
+    """Per-student work dir: <results-dir>/<run_id>/<student-email>/."""
+    base = _as_files_abs_path(results_dir)
+    return f"{base.rstrip('/')}/{run_id}/{student_folder}"
+
+
+def _cmd_done_path(results_dir: str | Path, run_id: str, student_folder: str) -> str:
     """Side-channel completion file written after the student command finishes."""
-    return f"{_cmd_work_dir(run_id, instance_slug)}/.cmd_done"
+    return f"{_cmd_work_dir(results_dir, run_id, student_folder)}/.cmd_done"
 
 
-def _cmd_output_paths(run_id: str, instance_slug: str) -> tuple[str, str]:
-    """Known stdout/stderr paths owned by grade (not platform default redirects)."""
-    base = _cmd_work_dir(run_id, instance_slug)
-    return f"{base}/output.log", f"{base}/error.log"
+def _cmd_output_path(results_dir: str | Path, run_id: str, student_folder: str) -> str:
+    """Single combined stdout+stderr log path owned by grade."""
+    return f"{_cmd_work_dir(results_dir, run_id, student_folder)}/output.log"
 
 
 def _wrap_command_with_done_file(
@@ -61,20 +123,19 @@ def _wrap_command_with_done_file(
     *,
     done_file: str,
     output_log: str,
-    error_log: str,
 ) -> str:
-    """Run command with explicit redirects, then write a completion/exit marker.
+    """Run command with one merged log file, then write a completion/exit marker.
 
     Nuvolos default capture only keeps the last segment of a command sequence
     and skips defaults entirely when the submitted string contains `>`. Grade
-    therefore owns stdout/stderr paths: redirect the validation body itself,
-    then write `.cmd_done` / `.cmd_exit.<code>` with POSIX shell only (no
-    Python runtime required in the student app).
+    therefore owns the log path: redirect the validation body with ``> out 2>&1``
+    so stdout and stderr land in a single ``output.log``, then write
+    ``.cmd_done`` / ``.cmd_exit.<code>`` with POSIX shell only (no Python
+    runtime required in the student app).
     """
     work = str(Path(done_file).parent)
     work_q = shlex.quote(work)
     out_q = shlex.quote(output_log)
-    err_q = shlex.quote(error_log)
     done_q = shlex.quote(done_file)
     # Marker writes must stay pure shell so RStudio / python3-only / no-Python
     # images can still signal completion. `.cmd_exit.$ec` is listed via the
@@ -83,19 +144,12 @@ def _wrap_command_with_done_file(
         f"work={work_q}\n"
         f"done_file={done_q}\n"
         f"mkdir -p \"$work\"\n"
-        f"{{\n{command}\n}} > {out_q} 2> {err_q}\n"
+        f"{{\n{command}\n}} > {out_q} 2>&1\n"
         f"ec=$?\n"
         f"printf '%s' \"$ec\" > \"$done_file\"\n"
         f": > \"$work/.cmd_exit.$ec\"\n"
         f"exit \"$ec\""
     )
-
-
-
-
-
-
-
 def _require_teaching_master(org_slug: str, space_slug: str) -> None:
     """Require the current context to be a teaching-space master instance."""
     try:
@@ -161,8 +215,11 @@ def collect_submissions(
     assignment_name: str,
     assignment_folder: str,
     target_folder: str,
+    *,
+    org_slug: str | None = None,
+    space_slug: str | None = None,
 ) -> int:
-    """Run nvcollect collect() in-process."""
+    """Run nvcollect collect() in-process, then rename dirs to student email."""
     clog.info(
         f"Collecting submissions: assignment={assignment_name!r}, "
         f"folder={assignment_folder!r}, destination={target_folder}."
@@ -174,7 +231,11 @@ def collect_submissions(
     if code not in (0, None):
         raise ClickException(f"Collect failed with code {code}")
     clog.info(f"Collect completed into {target_folder}")
+    if org_slug and space_slug:
+        relabel_collect_targets_by_email(target_folder, org_slug, space_slug)
     return 0
+
+
 
 
 def read_manifest(manifest_path: str | Path) -> dict:
@@ -213,26 +274,370 @@ def read_manifest(manifest_path: str | Path) -> dict:
     return data
 
 
-def instance_slug_from_item(item: dict) -> str:
-    """Derive instance_slug from a nvcollect manifest item."""
-    if not isinstance(item, dict):
-        raise ClickException(f"Manifest item must be an object, got {type(item)!r}")
-
-    target = item.get("target") or ""
-    if target:
-        slug = Path(str(target).rstrip("/")).name
-        if slug:
-            return slug
-
-    src = item.get("src") or ""
+def instance_slug_from_handin_src(src: str | None) -> str | None:
+    """Extract instance slug from nvcollect handin src path."""
+    if not src:
+        return None
     parts = Path(str(src)).parts
     try:
         handin_idx = parts.index("handin")
-        return parts[handin_idx + 1]
-    except (ValueError, IndexError) as exc:
-        raise ClickException(
-            f"Cannot derive instance_slug from manifest item: {item!r}"
-        ) from exc
+        slug = parts[handin_idx + 1]
+        return slug or None
+    except (ValueError, IndexError):
+        return None
+
+
+def instance_slug_from_item(item: dict) -> str:
+    """Derive instance_slug from a nvcollect manifest item.
+
+    Prefer the handin ``src`` path (stable after email folder rename). Fall back
+    to the target basename for older manifests.
+    """
+    if not isinstance(item, dict):
+        raise ClickException(f"Manifest item must be an object, got {type(item)!r}")
+
+    slug = instance_slug_from_handin_src(item.get("src"))
+    if slug:
+        return slug
+
+    target = item.get("target") or ""
+    if target:
+        name = Path(str(target).rstrip("/")).name
+        if name:
+            return name
+
+    raise ClickException(f"Cannot derive instance_slug from manifest item: {item!r}")
+
+
+def _manifest_file_path(target_folder: str | Path) -> Path:
+    path = Path(target_folder).expanduser()
+    if path.is_file():
+        return path
+    return path / MANIFEST_FILENAME
+
+
+def relabel_collect_targets_by_email(
+    target_folder: str | Path,
+    org_slug: str,
+    space_slug: str,
+) -> dict:
+    """Rename collected submission dirs from instance_slug → student email.
+
+    nvcollect writes ``<target>/<instance_slug>/``. After collect, rename each
+    tree to ``<target>/<student-email>/`` and rewrite ``nvcollect_manifest.json``
+    targets accordingly. Idempotent when folders are already email-named.
+    """
+    root = Path(target_folder).expanduser()
+    if not root.is_dir():
+        raise ClickException(f"Collect target folder not found: {root}")
+
+    manifest_path = _manifest_file_path(root)
+    data = read_manifest(root)
+    items = list(data.get("items") or [])
+    if not items:
+        clog.info("No collect items to relabel by email.")
+        return data
+
+    instances = list_instances(org_slug=org_slug, space_slug=space_slug)
+    by_slug: dict[str, dict] = {}
+    for inst in instances:
+        d = _model_to_dict(inst) if not isinstance(inst, dict) else inst
+        slug = d.get("slug") or d.get("short_id")
+        if slug:
+            by_slug[str(slug)] = d
+
+    used_folders: set[str] = set()
+    new_items: list[dict] = []
+    renamed = 0
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        slug = instance_slug_from_item(item)
+        meta = by_slug.get(slug)
+        email = _email_from_instance_meta(meta)
+        folder = _safe_student_folder_name(
+            email or (meta or {}).get("name"),
+            slug,
+        )
+        # Avoid two students collapsing into one directory name.
+        base_folder = folder
+        n = 2
+        while folder in used_folders:
+            folder = f"{base_folder}_{n}"
+            n += 1
+        used_folders.add(folder)
+
+        old_target = str(item.get("target") or "").rstrip("/")
+        old_dir = Path(old_target) if old_target else root / slug
+        if not old_dir.is_absolute():
+            old_dir = root / old_dir.name
+        # If target was relative-ish, prefer sibling under root by basename.
+        if old_dir.parent != root and (root / old_dir.name).exists():
+            candidate = root / old_dir.name
+            if candidate.is_dir():
+                old_dir = candidate
+        if not old_dir.exists():
+            # Try slug dir under root (fresh nvcollect layout).
+            alt = root / slug
+            if alt.is_dir():
+                old_dir = alt
+
+        new_dir = root / folder
+        new_target = str(new_dir) + "/"
+
+        if old_dir.resolve() != new_dir.resolve():
+            if not old_dir.exists():
+                clog.warning(
+                    f"Collect folder missing for {slug} (expected {old_dir}); "
+                    f"manifest target will still use {folder}."
+                )
+            elif new_dir.exists():
+                clog.warning(
+                    f"Email folder already exists ({new_dir}); leaving {old_dir} in place."
+                )
+                new_target = str(old_dir) + "/"
+                folder = old_dir.name
+            else:
+                clog.info(f"Renaming collect {old_dir.name} → {folder}")
+                old_dir.rename(new_dir)
+                renamed += 1
+
+        new_items.append(
+            {
+                **item,
+                "target": new_target,
+                "instance_slug": slug,
+                "email": email,
+                "folder_name": folder,
+            }
+        )
+
+    data["items"] = new_items
+    data.setdefault("meta", {})
+    data["meta"]["relabeled_by_email"] = True
+    data["meta"]["relabel_time"] = _utc_now_iso()
+
+    with manifest_path.open("w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+    clog.info(
+        f"Collect tree under {root}: {renamed} folder(s) renamed to student email; "
+        f"manifest updated ({manifest_path.name})."
+    )
+    return data
+
+
+
+
+def _handback_path_from_handin_src(src: str | None) -> str | None:
+    """Map a handin review path to the parallel handback path."""
+    if not src:
+        return None
+    text = str(src)
+    if "/assignments-review/handin" in text:
+        return text.replace(
+            "/assignments-review/handin",
+            "/assignments-review/handback",
+            1,
+        )
+    if text.startswith(HANDIN_REVIEW_ROOT):
+        return HANDBACK_REVIEW_ROOT + text[len(HANDIN_REVIEW_ROOT) :]
+    return None
+
+
+def _chmod_tree_readonly(path: Path) -> None:
+    """Best-effort make files under path read-only (students must not edit feedback)."""
+    if not path.exists():
+        return
+    try:
+        if path.is_file():
+            os.chmod(path, 0o444)
+            return
+        for root, dirs, files in os.walk(path):
+            try:
+                os.chmod(root, 0o555)
+            except OSError:
+                pass
+            for name in files:
+                fp = Path(root) / name
+                try:
+                    os.chmod(fp, 0o444)
+                except OSError:
+                    pass
+    except OSError as exc:
+        clog.debug(f"chmod readonly failed for {path}: {exc}")
+
+
+def _safe_copy_into(src_file: Path, dest_dir: Path, name: str | None = None) -> Path | None:
+    """Copy a file into dest_dir; create parents. Returns dest path or None."""
+    if not src_file.is_file():
+        return None
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / (name or src_file.name)
+    try:
+        if dest.exists() and (dest.is_file() or dest.is_symlink()):
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+        shutil.copy2(src_file, dest)
+        return dest
+    except OSError as exc:
+        clog.warning(f"Failed to copy {src_file} → {dest}: {exc}")
+        return None
+
+
+def publish_student_results_to_handin_structure(
+    *,
+    student_record: dict,
+    run_id: str,
+) -> dict:
+    """Copy grade artifacts into handin + handback trees on the instructor FS.
+
+    Layout (existing platform structure)::
+
+        /files/assignments-review/handin/<instance>/<assignment>/<ts>_…/…
+        /files/assignments-review/handback/<instance>/<assignment>/<ts>_…/…
+
+    Handback is what students see (read-only). We also place files under the
+    original handin src folder so instructors viewing handins see the same
+    artifacts next to the submission.
+    """
+    pub = {
+        "handin_dir": None,
+        "handback_dir": None,
+        "files": [],
+        "error": None,
+    }
+    logs = student_record.get("instructor_logs") or {}
+    local_paths = logs.get("local_paths") or {}
+    output_log = local_paths.get("output.log")
+    src = student_record.get("src")
+    target = student_record.get("target")
+
+    # Prefer the handin submission folder from the collect manifest src.
+    handin_dir = Path(str(src)).expanduser() if src else None
+    handback_dir = None
+    hb = _handback_path_from_handin_src(src)
+    if hb:
+        handback_dir = Path(hb)
+
+    # Fallback: collect target folder on instructor.
+    collect_dir = Path(str(target)).expanduser() if target else None
+
+    artifact_files: list[Path] = []
+    if output_log:
+        p = Path(output_log)
+        if p.is_file():
+            artifact_files.append(p)
+
+    # Write a small grade_meta.json next to the log when we have execute info.
+    meta = {
+        "run_id": run_id,
+        "instance_slug": student_record.get("instance_slug"),
+        "email": student_record.get("email") or student_record.get("folder_name"),
+        "status": student_record.get("status"),
+        "error": student_record.get("error"),
+        "exit_code": (student_record.get("execute") or {}).get("exit_code"),
+        "finished_at": student_record.get("finished_at") or _utc_now_iso(),
+        "command": student_record.get("command"),
+    }
+    meta_tmp = None
+    try:
+        work = logs.get("work_dir")
+        meta_dir = Path(work) if work else (
+            collect_dir if collect_dir else Path("/tmp")
+        )
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        meta_tmp = meta_dir / GRADE_META_FILENAME
+        meta_tmp.write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
+        artifact_files.append(meta_tmp)
+    except OSError as exc:
+        clog.debug(f"Could not write grade_meta.json: {exc}")
+
+    destinations: list[Path] = []
+    if handin_dir is not None:
+        destinations.append(handin_dir)
+        pub["handin_dir"] = str(handin_dir)
+    if handback_dir is not None:
+        destinations.append(handback_dir)
+        pub["handback_dir"] = str(handback_dir)
+    # Always keep a copy in the collect/results student folder when present.
+    if collect_dir is not None and collect_dir not in destinations:
+        destinations.append(collect_dir)
+
+    if not destinations:
+        pub["error"] = "No handin/handback/collect destination available"
+        return pub
+
+    if not artifact_files:
+        pub["error"] = "No grade artifact files to publish"
+        return pub
+
+    published: list[str] = []
+    for dest_dir in destinations:
+        artifacts_dir = dest_dir / GRADE_ARTIFACTS_DIRNAME
+        for art in artifact_files:
+            copied = _safe_copy_into(art, artifacts_dir)
+            if copied is not None:
+                published.append(str(copied))
+                _chmod_tree_readonly(copied)
+
+    pub["files"] = published
+    if not published:
+        pub["error"] = "Publish copied no files"
+    else:
+        clog.info(
+            f"[{student_record.get('instance_slug')}] published grade artifacts to "
+            f"handin/handback structure ({len(published)} file(s))."
+        )
+    return pub
+
+
+def handback_collected_results(collect_dir: str | Path) -> dict:
+    """Push collect+grade folders into assignments-review/handback via nvcollect.
+
+    Students see handback content in the assignment UI (read-only). Instructor
+    already has the parallel tree under assignments-review/handback after this.
+    """
+    result = {"status": "pending", "error": None}
+    root = Path(collect_dir).expanduser()
+    if not root.is_dir():
+        result["status"] = "skipped"
+        result["error"] = f"collect dir missing: {root}"
+        return result
+    manifest = root / MANIFEST_FILENAME
+    if not manifest.is_file():
+        result["status"] = "skipped"
+        result["error"] = f"no {MANIFEST_FILENAME} in {root}"
+        return result
+    try:
+        _require_nuvolos_collect()
+        from nuvolos_collect.handback import handback as nv_handback
+
+        clog.info(f"Handing back graded results from {root} → assignments-review/handback.")
+        code = nv_handback(str(root))
+        if code not in (0, None):
+            result["status"] = "failed"
+            result["error"] = f"handback returned {code}"
+            return result
+        # Enforce read-only on handback targets listed in manifest.
+        data = read_manifest(root)
+        for item in data.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            hb = item.get("handback_target") or _handback_path_from_handin_src(
+                item.get("src")
+            )
+            if hb:
+                _chmod_tree_readonly(Path(hb))
+        result["status"] = "ok"
+        clog.info("Handback completed; student-visible feedback is read-only under handback.")
+    except Exception as exc:
+        result["status"] = "failed"
+        result["error"] = str(exc)
+        clog.error(f"Handback failed: {exc}")
+    return result
 
 
 def expand_command_template(
@@ -273,10 +678,19 @@ def resolve_students(
         if instance_filter and slug != instance_filter:
             continue
         meta = by_slug.get(slug)
+        instance_name = (meta or {}).get("name")
+        email = _email_from_instance_meta(meta)
+        folder_name = item.get("folder_name") or _safe_student_folder_name(
+            email or instance_name, slug
+        )
         students.append({
-            "index": idx, "instance_slug": slug, "src": item.get("src"),
+            "index": idx,
+            "instance_slug": slug,
+            "src": item.get("src"),
             "target": item.get("target"),
-            "instance_name": (meta or {}).get("name"),
+            "instance_name": instance_name,
+            "email": email,
+            "folder_name": folder_name,
             "found_in_space": meta is not None,
         })
 
@@ -286,6 +700,8 @@ def resolve_students(
         students = students[: max(0, limit)]
     clog.info(f"Resolved {len(students)} student submission(s).")
     return students
+
+
 
 
 def _serialize_execute_result(result) -> dict:
@@ -529,12 +945,20 @@ def _files_area_entry_exists(
 
 
 
-def _read_text_if_exists(path: Path, max_bytes: int = 512_000) -> str | None:
+def _read_text_if_exists(path: Path, max_bytes: int = 5_000_000) -> tuple[str, bool] | None:
+    """Read a text file's contents; returns ``(text, truncated)`` or None if missing.
+
+    Reads at most ``max_bytes + 1`` bytes so large logs are not fully loaded.
+    """
     try:
         if not path.is_file():
             return None
-        data = path.read_bytes()[:max_bytes]
-        return data.decode("utf-8", errors="replace")
+        with path.open("rb") as fh:
+            data = fh.read(max_bytes + 1)
+        truncated = len(data) > max_bytes
+        if truncated:
+            data = data[:max_bytes]
+        return data.decode("utf-8", errors="replace"), truncated
     except OSError:
         return None
 
@@ -544,36 +968,39 @@ def pull_student_logs_to_instructor(
     org_slug: str,
     space_slug: str,
     student_instance_slug: str,
+    student_folder: str,
     app_slug: str,
     execute_info: dict,
     run_id: str,
     results_dir: Path,
     instructor_instance_slug: str = "master",
 ) -> dict:
-    """Copy execute logs from student instance onto instructor instance + results_dir.
+    """Distribute execute logs from student instance into results-dir on instructor.
 
-    1) Stage unique copies under /files/grade_results/{run_id}/{student}/ on student
-    2) Distribute those files to instructor (master) development snapshot
-    3) Copy into local results_dir/{student}/ on instructor FS
+    Logs already live under ``<results-dir>/<run_id>/<student-email>/`` on the
+    student FS. Distribute that folder's files to the instructor instance, then
+    read them from the same path locally.
     """
     pull = {
         "status": "pending",
-        "staging_dir": None,
+        "student_folder": student_folder,
+        "work_dir": None,
         "instructor_paths": {},
         "local_paths": {},
         "log_excerpts": {},
+        "log_truncated": {},
         "error": None,
     }
     out_p = execute_info.get("output_path")
-    err_p = execute_info.get("error_path")
+    err_p = execute_info.get("error_path")  # legacy dual-log runs only
     meta_p = execute_info.get("metadata_path")
     if not out_p and not err_p:
         pull["status"] = "skipped"
-        pull["error"] = "execute result had no output/error paths"
+        pull["error"] = "execute result had no output path"
         return pull
 
-    # Output/error may legitimately be empty; existence is enough once the
-    # command done-file has already been observed by the caller.
+    # Log may legitimately be empty; existence is enough once the command
+    # done-file has already been observed by the caller.
     for label, abs_path in (("output", out_p), ("error", err_p), ("metadata", meta_p)):
         rel = _files_area_rel(abs_path)
         if not rel:
@@ -592,44 +1019,49 @@ def pull_student_logs_to_instructor(
                 f"[{student_instance_slug}] timed out waiting for {label} log at {abs_path}"
             )
 
-    staging_dir = f"/files/grade_results/{run_id}/{student_instance_slug}"
-    pull["staging_dir"] = staging_dir
+    # Final layout: <results-dir>/<run_id>/<student-email>/output.log
+    work_dir = _cmd_work_dir(results_dir, run_id, student_folder)
+    pull["work_dir"] = work_dir
     staged_names: list[str] = []
-    # Validation already wrote grade-owned logs under staging_dir — distribute
-    # those paths directly. Only copy when execute_info points elsewhere
-    # (e.g. platform metadata.json under nuvolos_api_out/).
-    copies: list[tuple[str, str, str]] = []  # (label, src, dest_name)
+    # Validation already wrote the merged log under work_dir — distribute it
+    # directly. Only copy when execute_info points elsewhere (legacy error.log
+    # or platform metadata.json under nuvolos_api_out/).
+    copies: list[tuple[str, str, str]] = []  # (mode, src, dest_name)
     if out_p:
-        if out_p.rstrip("/") == f"{staging_dir}/output.log":
+        if out_p.rstrip("/") == f"{work_dir}/output.log":
             staged_names.append("output.log")
         else:
-            copies.append(("output", out_p, "output.log"))
-    if err_p:
-        if err_p.rstrip("/") == f"{staging_dir}/error.log":
-            staged_names.append("error.log")
-        else:
-            copies.append(("error", err_p, "error.log"))
+            copies.append(("cp", out_p, "output.log"))
+    # Legacy separate stderr → append into the single output.log.
+    if err_p and err_p.rstrip("/") != f"{work_dir}/output.log":
+        copies.append(("append", err_p, "output.log"))
+        if "output.log" not in staged_names:
+            staged_names.append("output.log")
     if meta_p:
-        if meta_p.rstrip("/") == f"{staging_dir}/metadata.json":
+        if meta_p.rstrip("/") == f"{work_dir}/metadata.json":
             staged_names.append("metadata.json")
         else:
-            copies.append(("metadata", meta_p, "metadata.json"))
+            copies.append(("cp", meta_p, "metadata.json"))
 
     try:
         if copies:
-            parts = [f"mkdir -p {shlex.quote(staging_dir)}"]
-            for _label, src, dest_name in copies:
-                parts.append(
-                    f"cp -f {shlex.quote(src)} {shlex.quote(staging_dir + '/' + dest_name)}"
-                )
-                staged_names.append(dest_name)
-            parts.append(f"ls -la {shlex.quote(staging_dir)}")
+            parts = [f"mkdir -p {shlex.quote(work_dir)}"]
+            for mode, src, dest_name in copies:
+                dest = f"{work_dir}/{dest_name}"
+                if mode == "append":
+                    parts.append(
+                        f"cat {shlex.quote(src)} >> {shlex.quote(dest)} 2>/dev/null || true"
+                    )
+                else:
+                    parts.append(f"cp -f {shlex.quote(src)} {shlex.quote(dest)}")
+                if dest_name not in staged_names:
+                    staged_names.append(dest_name)
+            parts.append(f"ls -la {shlex.quote(work_dir)}")
             stage_cmd = " && ".join(parts)
-            stage_done = f"{staging_dir}/.stage_done"
-            stage_out = f"{staging_dir}/.stage_out.log"
-            stage_err = f"{staging_dir}/.stage_err.log"
+            stage_done = f"{work_dir}/.stage_done"
+            stage_out = f"{work_dir}/.stage_out.log"
             clog.info(
-                f"[{student_instance_slug}] staging logs under {staging_dir} for instructor pull."
+                f"[{student_instance_slug}] staging logs under {work_dir} for instructor pull."
             )
             execute_command_in_app(
                 org_slug=org_slug,
@@ -640,7 +1072,6 @@ def pull_student_logs_to_instructor(
                     stage_cmd,
                     done_file=stage_done,
                     output_log=stage_out,
-                    error_log=stage_err,
                 ),
             )
             _wait_for_execute_completion(
@@ -652,7 +1083,7 @@ def pull_student_logs_to_instructor(
             )
         else:
             clog.info(
-                f"[{student_instance_slug}] validation logs already under {staging_dir}; "
+                f"[{student_instance_slug}] validation logs already under {work_dir}; "
                 f"skipping stage copy."
             )
 
@@ -660,7 +1091,7 @@ def pull_student_logs_to_instructor(
         # Only distribute files that were requested and actually landed.
         source_files = []
         for name in staged_names:
-            abs_staged = f"{staging_dir}/{name}"
+            abs_staged = f"{work_dir}/{name}"
             rel_staged = _files_area_rel(abs_staged)
             if rel_staged and _files_area_entry_exists(
                 org_slug=org_slug,
@@ -678,14 +1109,13 @@ def pull_student_logs_to_instructor(
         if not source_files:
             pull["status"] = "failed"
             pull["error"] = (
-                f"No staged log files found under {staging_dir} after staging command."
+                f"No log files found under {work_dir} after staging."
             )
             return pull
 
-
         clog.info(
             f"[{student_instance_slug}] distributing logs to instructor "
-            f"instance [{instructor_instance_slug}]."
+            f"instance [{instructor_instance_slug}] → {work_dir}."
         )
         task = distribute_content(
             org_slug=org_slug,
@@ -712,24 +1142,27 @@ def pull_student_logs_to_instructor(
                 "waiting briefly for FS sync."
             )
             time.sleep(5)
-        # On instructor FS after distribute, same paths under /files/...
-        local_dir = results_dir / student_instance_slug
+
+        # After distribute, same absolute paths appear on instructor under /files/...
+        local_dir = Path(work_dir)
         local_dir.mkdir(parents=True, exist_ok=True)
         distributed_names = [Path(p).name for p in source_files]
         for name in distributed_names:
-            instructor_path = Path(staging_dir) / name
-            # allow short FS settle
+            instructor_path = local_dir / name
             for _ in range(15):
                 if instructor_path.is_file():
                     break
                 time.sleep(1)
             pull["instructor_paths"][name] = str(instructor_path)
             if instructor_path.is_file():
-                dest = local_dir / name
-                shutil.copy2(instructor_path, dest)
-                pull["local_paths"][name] = str(dest)
+                # Already at final results-dir location; no secondary copy.
+                pull["local_paths"][name] = str(instructor_path)
                 if name.endswith(".log"):
-                    pull["log_excerpts"][name] = _read_text_if_exists(dest)
+                    read_result = _read_text_if_exists(instructor_path)
+                    if read_result is not None:
+                        text, truncated = read_result
+                        pull["log_excerpts"][name] = text
+                        pull["log_truncated"][name] = truncated
             else:
                 clog.warning(
                     f"[{student_instance_slug}] expected instructor file missing: "
@@ -738,30 +1171,23 @@ def pull_student_logs_to_instructor(
 
         if pull["local_paths"]:
             pull["status"] = "pulled"
-            # convenience combined view
-            summary_txt = local_dir / "combined.txt"
-            chunks = []
-            for name in ("output.log", "error.log"):
-                text = pull["log_excerpts"].get(name)
-                if text is not None:
-                    chunks.append(f"===== {name} =====\n{text}")
-            if chunks:
-                summary_txt.write_text("\n\n".join(chunks), encoding="utf-8")
-                pull["local_paths"]["combined.txt"] = str(summary_txt)
             clog.info(
-                f"[{student_instance_slug}] logs saved under {local_dir}"
+                f"[{student_instance_slug}] logs saved under {local_dir} "
+                f"(folder={student_folder}, file=output.log)"
             )
         else:
             pull["status"] = "failed"
             pull["error"] = (
                 "Distribute finished but logs not visible on instructor FS yet. "
-                f"Check {staging_dir} on master after a refresh."
+                f"Check {work_dir} on master after a refresh."
             )
     except Exception as exc:
         pull["status"] = "failed"
         pull["error"] = str(exc)
         clog.error(f"[{student_instance_slug}] log pull failed: {exc}")
     return pull
+
+
 
 
 def test_one_student(
@@ -774,13 +1200,17 @@ def test_one_student(
     dry_run: bool = False,
     skip_app_preflight: bool = False,
     run_id: str | None = None,
-    results_dir: Path | None = None,
+    results_root: str | Path | None = None,
+    student_folder: str | None = None,
     instructor_instance_slug: str = "master",
     pull_logs: bool = True,
 ) -> dict:
     """Start → wait RUNNING → execute → pull logs to instructor → stop."""
+    folder = student_folder or instance_slug
     record = {
         "instance_slug": instance_slug,
+        "student_folder": folder,
+        "email": folder if "@" in folder else None,
         "app_slug": app_slug,
         "command": command,
         "status": "pending",
@@ -790,7 +1220,10 @@ def test_one_student(
         "error": None,
         "stopped": None,
     }
-    clog.info(f"[{instance_slug}] check queued for app [{app_slug}].")
+    clog.info(
+        f"[{instance_slug}] check queued for app [{app_slug}] "
+        f"(folder={folder})."
+    )
     if dry_run:
         record["status"] = "dry_run"
         record["finished_at"] = _utc_now_iso()
@@ -798,10 +1231,11 @@ def test_one_student(
             f"[dry-run] would start/execute/stop app={app_slug} "
             f"on {org_slug}/{space_slug}/{instance_slug}: {command!r}"
         )
-        if pull_logs:
+        if pull_logs and results_root and run_id:
+            work = _cmd_work_dir(results_root, run_id, folder)
             clog.info(
                 f"[dry-run] would pull execute logs to instructor "
-                f"[{instructor_instance_slug}] and {results_dir}"
+                f"[{instructor_instance_slug}] under {work}"
             )
         return record
 
@@ -837,7 +1271,7 @@ def test_one_student(
         nonlocal logs_pulled
         if logs_pulled:
             return
-        if not pull_logs or results_dir is None or not run_id:
+        if not pull_logs or results_root is None or not run_id:
             return
         execute_info = record.get("execute") or {}
         if not execute_info.get("output_path") and not execute_info.get("error_path"):
@@ -846,38 +1280,60 @@ def test_one_student(
             clog.info(
                 f"[{instance_slug}] pulling logs to instructor ({reason})."
             )
+            click.echo(f">>> [{instance_slug}] pulling logs ({reason})…")
             record["instructor_logs"] = pull_student_logs_to_instructor(
                 org_slug=org_slug,
                 space_slug=space_slug,
                 student_instance_slug=instance_slug,
+                student_folder=folder,
                 app_slug=app_slug,
                 execute_info=execute_info,
                 run_id=run_id,
-                results_dir=results_dir,
+                results_dir=Path(results_root),
                 instructor_instance_slug=instructor_instance_slug,
             )
-            logs_pulled = True
-            excerpts = (record["instructor_logs"] or {}).get("log_excerpts") or {}
+            pull = record["instructor_logs"] or {}
+            logs_pulled = pull.get("status") == "pulled"
+            clog.info(
+                f"[{instance_slug}] log pull status={pull.get('status')!r} "
+                f"work_dir={pull.get('work_dir')!r} "
+                f"local_paths={list((pull.get('local_paths') or {}).keys())}"
+            )
+            if pull.get("error"):
+                clog.warning(f"[{instance_slug}] log pull note: {pull.get('error')}")
+            excerpts = pull.get("log_excerpts") or {}
             out_ex = excerpts.get("output.log")
-            err_ex = excerpts.get("error.log")
-            if out_ex:
+            out_truncated = (pull.get("log_truncated") or {}).get("output.log")
+            if out_ex is not None:
+                label = "(truncated)" if out_truncated else "(full)"
+                ban = f"===== [{instance_slug}] output.log {label} ====="
+                click.echo(ban)
+                click.echo(out_ex if out_ex.endswith("\n") else out_ex + "\n")
+                click.echo("=" * len(ban))
                 clog.info(
-                    f"[{instance_slug}] stdout (excerpt):\n{out_ex[:2000]}"
+                    f"[{instance_slug}] output.log length={len(out_ex)} chars "
+                    + ("(truncated above)." if out_truncated else "(printed in full above).")
                 )
-            if err_ex:
-                clog.info(
-                    f"[{instance_slug}] stderr (excerpt):\n{err_ex[:2000]}"
+            else:
+                click.echo(
+                    f">>> [{instance_slug}] no output.log content available after pull "
+                    f"(status={pull.get('status')!r})."
                 )
         except Exception as pull_exc:
             clog.error(
                 f"[{instance_slug}] log pull failed ({reason}): {pull_exc}"
             )
+            click.echo(f"!!! [{instance_slug}] log pull failed: {pull_exc}")
             record["instructor_logs"] = {
                 "status": "failed",
                 "error": str(pull_exc),
             }
 
+
     try:
+        click.echo(
+            f"\n>>> [{instance_slug}] ({folder}) starting app [{app_slug}] (1/5)…"
+        )
         clog.info(f"[{instance_slug}] starting app [{app_slug}] (1/5).")
         start_app(
             org_slug=org_slug,
@@ -887,6 +1343,7 @@ def test_one_student(
             node_pool=None,
         )
         started = True
+        click.echo(f">>> [{instance_slug}] waiting until app is RUNNING…")
         wait_for_app_running(
             org_slug=org_slug,
             space_slug=space_slug,
@@ -894,19 +1351,22 @@ def test_one_student(
             app_slug=app_slug,
         )
         clog.info(f"[{instance_slug}] app is running (2/5).")
-        if not run_id:
+        click.echo(f">>> [{instance_slug}] app is RUNNING (2/5).")
+        if not run_id or results_root is None:
             raise ClickException(
-                f"[{instance_slug}] internal error: run_id required to track command completion."
+                f"[{instance_slug}] internal error: run_id and results_root "
+                f"required to track command completion."
             )
-        done_file = _cmd_done_path(run_id, instance_slug)
-        output_log, error_log = _cmd_output_paths(run_id, instance_slug)
+        done_file = _cmd_done_path(results_root, run_id, folder)
+        output_log = _cmd_output_path(results_root, run_id, folder)
         wrapped_command = _wrap_command_with_done_file(
             command,
             done_file=done_file,
             output_log=output_log,
-            error_log=error_log,
         )
         clog.info(f"[{instance_slug}] executing command (3/5): {command!r}")
+        click.echo(f">>> [{instance_slug}] executing (3/5): {command!r}")
+        click.echo(f"    log path on student: {output_log}")
         exec_result = execute_command_in_app(
             org_slug=org_slug,
             space_slug=space_slug,
@@ -915,13 +1375,15 @@ def test_one_student(
             command=wrapped_command,
         )
         record["execute"] = _serialize_execute_result(exec_result)
-        # Grade owns these paths (wrapper uses explicit redirects).
         record["execute"]["output_path"] = output_log
-        record["execute"]["error_path"] = error_log
+        record["execute"].pop("error_path", None)
         record["execute"]["done_file"] = done_file
         record["execute"]["submitted_command"] = command
-        # Execute returns 202 immediately; wait for the done-file before
-        # treating the run as finished, pulling logs, or stopping the app.
+        clog.info(
+            f"[{instance_slug}] execute accepted; waiting for completion "
+            f"(done_file={done_file})."
+        )
+        click.echo(f">>> [{instance_slug}] waiting for command completion…")
         exit_code = _wait_for_execute_completion(
             org_slug=org_slug,
             space_slug=space_slug,
@@ -935,18 +1397,22 @@ def test_one_student(
             clog.error(
                 f"[{instance_slug}] command failed (4/5): exit_code={exit_code}."
             )
+            click.echo(f"!!! [{instance_slug}] command FAILED exit_code={exit_code}")
         else:
             record["status"] = "executed"
             clog.info(f"[{instance_slug}] command completed (4/5).")
+            click.echo(f">>> [{instance_slug}] command OK exit_code=0 (4/5).")
 
         _try_pull_logs("after command completion")
+
+
 
     except Exception as exc:
         record["status"] = "failed"
         record["error"] = str(exc)
         clog.error(f"Student [{instance_slug}] failed: {exc}")
         # Timeouts / mid-flight failures: salvage any logs already under
-        # grade_results before the app is stopped.
+        # results-dir before the app is stopped.
         _try_pull_logs("after failure/timeout")
     finally:
         if started and not logs_pulled:
@@ -983,7 +1449,7 @@ def run_grade_check(
     space_slug: str,
     app_slug: str,
     command: str,
-    results_dir: str,
+    results_dir: str | None = None,
     target_folder: str | None = None,
     assignment_name: str | None = None,
     assignment_folder: str | None = None,
@@ -998,34 +1464,83 @@ def run_grade_check(
     pull_logs: bool = True,
     instructor_instance_slug: str | None = None,
 ) -> dict:
-    """Orchestrator: optional collect → resolve → lifecycle batch → instructor logs."""
+    """Orchestrator: collect → test → publish into handin/handback structure.
+
+    Durable instructor + student artifacts live under the existing assignment
+    review trees (students see **handback**, read-only)::
+
+        /files/assignments-review/handin/<instance>/<assignment>/<ts>_…/
+            output.log
+            grade_meta.json
+        /files/assignments-review/handback/<instance>/<assignment>/<ts>_…/
+            output.log
+            grade_meta.json   # same content, student-visible readonly
+
+    ``results_dir`` is only an optional staging override (default
+    ``/files/.nuvolos_grade``) for execute/distribute scratch space.
+    """
     instructor_instance_slug = instructor_instance_slug or _instructor_instance_slug()
+
+    # Scratch tree for collect + in-app execute/distribute (not the durable store).
+    work_root = _as_files_abs_path(results_dir or DEFAULT_GRADE_WORK_ROOT)
+    work_path = Path(work_root)
+    work_path.mkdir(parents=True, exist_ok=True)
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_results_dir = work_path / run_id
+    run_results_dir.mkdir(parents=True, exist_ok=True)
+    run_results_abs = _as_files_abs_path(run_results_dir)
+
+    collect_dest = run_results_abs
+    if target_folder and not skip_collect:
+        clog.warning(
+            "--target-folder is deprecated for grade check; using internal staging "
+            f"under {run_results_abs}. Final artifacts go to handin/handback."
+        )
+
     clog.info(
         f"Starting grade run for {org_slug}/{space_slug}: app={app_slug}, "
         f"parallel={max(1, parallel)}, dry_run={dry_run}, pull_logs={pull_logs}, "
-        f"instructor_instance={instructor_instance_slug}."
+        f"instructor_instance={instructor_instance_slug}, "
+        f"staging={run_results_abs}, durable=handin+handback."
     )
+
+
     if not skip_collect:
-        if not assignment_name or not assignment_folder or not target_folder:
+        if not assignment_name or not assignment_folder:
             raise ClickException(
-                "Collect requires --assignment-name, --assignment-folder, "
-                "and --target-folder (or pass --skip-collect with --manifest)."
+                "Collect requires --assignment-name and --assignment-folder "
+                "(or pass --skip-collect with --manifest / prior results run dir)."
             )
         if not dry_run:
-            collect_submissions(assignment_name, assignment_folder, target_folder)
+            collect_submissions(
+                assignment_name,
+                assignment_folder,
+                collect_dest,
+                org_slug=org_slug,
+                space_slug=space_slug,
+            )
         else:
             clog.info(
                 f"[dry-run] would collect assignment_name={assignment_name!r} "
-                f"assignment_folder={assignment_folder!r} target_folder={target_folder!r}"
+                f"assignment_folder={assignment_folder!r} into {collect_dest} "
+                f"(student-email folders + later output.log in the same dirs)"
             )
-        manifest_source = target_folder
+        manifest_source = collect_dest
     else:
         manifest_source = manifest_path or target_folder
         if not manifest_source:
             raise ClickException(
                 "--skip-collect requires --manifest or --target-folder "
-                "pointing at an existing collect output."
+                "pointing at an existing collect / prior results run directory."
             )
+        # Existing collect trees may still use instance_slug folder names.
+        relabel_root = target_folder or (
+            str(Path(manifest_source).parent)
+            if Path(manifest_source).is_file()
+            else manifest_source
+        )
+        if not dry_run and relabel_root and Path(relabel_root).is_dir():
+            relabel_collect_targets_by_email(relabel_root, org_slug, space_slug)
 
     if skip_collect or not dry_run:
         manifest = read_manifest(manifest_source)
@@ -1044,11 +1559,6 @@ def run_grade_check(
         limit=limit,
     )
     clog.info(f"Prepared {len(students)} student(s) for grading.")
-    results_path = Path(results_dir).expanduser().resolve()
-    results_path.mkdir(parents=True, exist_ok=True)
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_results_dir = results_path / run_id
-    run_results_dir.mkdir(parents=True, exist_ok=True)
 
     summary = {
         "run_id": run_id,
@@ -1057,7 +1567,9 @@ def run_grade_check(
         "space_slug": space_slug,
         "app_slug": app_slug,
         "command_template": command,
-        "target_folder": target_folder,
+        "target_folder": collect_dest if not skip_collect else (
+            target_folder or manifest_source
+        ),
         "assignment_name": assignment_name,
         "assignment_folder": assignment_folder,
         "skip_collect": skip_collect,
@@ -1066,7 +1578,11 @@ def run_grade_check(
         "parallel": parallel,
         "pull_logs": pull_logs,
         "instructor_instance_slug": instructor_instance_slug,
-        "results_run_dir": str(run_results_dir),
+        "staging_root": work_root,
+        "staging_run_dir": run_results_abs,
+        "durable_store": f"{HANDIN_REVIEW_ROOT} + {HANDBACK_REVIEW_ROOT}",
+
+
         "counts": {
             "total": len(students),
             "ok": 0,
@@ -1079,6 +1595,7 @@ def run_grade_check(
 
     def process(student):
         slug = student["instance_slug"]
+        folder = student.get("folder_name") or slug
         rec = test_one_student(
             org_slug=org_slug,
             space_slug=space_slug,
@@ -1091,7 +1608,9 @@ def run_grade_check(
             ),
             dry_run=dry_run,
             run_id=run_id,
-            results_dir=run_results_dir,
+            results_root=work_root,
+
+            student_folder=folder,
             instructor_instance_slug=instructor_instance_slug,
             pull_logs=pull_logs,
         )
@@ -1100,9 +1619,12 @@ def run_grade_check(
                 "src": student.get("src"),
                 "target": student.get("target"),
                 "instance_name": student.get("instance_name"),
+                "email": student.get("email"),
+                "folder_name": folder,
             }
         )
         return rec
+
 
     runnable = []
     for student in students:
@@ -1183,16 +1705,57 @@ def run_grade_check(
 
 
     summary["finished_at"] = _utc_now_iso()
-    out_file = results_path / f"grade_run_{run_id}.json"
-    with out_file.open("w", encoding="utf-8") as fh:
-        json.dump(summary, fh, indent=2, default=str)
-    summary["results_file"] = str(out_file)
+
+    # Publish each student's artifacts into handin + handback path structure.
+    if not dry_run:
+        for rec in summary["students"]:
+            if rec.get("status") in ("skipped", "dry_run", "pending"):
+                continue
+            try:
+                rec["handin_publish"] = publish_student_results_to_handin_structure(
+                    student_record=rec,
+                    run_id=run_id,
+                )
+            except Exception as exc:
+                rec["handin_publish"] = {"error": str(exc)}
+                clog.warning(
+                    f"[{rec.get('instance_slug')}] handin publish failed: {exc}"
+                )
+            publish_error = (rec.get("handin_publish") or {}).get("error")
+            if publish_error and rec.get("status") == "executed":
+                rec["status"] = "failed"
+                rec["error"] = rec.get("error") or f"publish failed: {publish_error}"
+                summary["counts"]["ok"] -= 1
+                summary["counts"]["failed"] += 1
+
+        # Full-tree handback so students see feedback in the assignment UI (readonly).
+        collect_for_handback = summary.get("target_folder") or run_results_abs
+        if collect_for_handback and Path(collect_for_handback).expanduser().is_file():
+            collect_for_handback = str(Path(collect_for_handback).expanduser().parent)
+        summary["handback"] = handback_collected_results(collect_for_handback)
+        if summary["handback"].get("status") == "failed":
+            summary["counts"]["failed"] += 1
+
+    # No _nuvolos_grade_runs / grade_run_*.json — durable artifacts are only
+    # per-student output.log + grade_meta.json under handin/handback.
+    summary.pop("results_file", None)
+    summary.pop("results_run_dir", None)
     clog.info(
         f"Grade run complete: ok={summary['counts']['ok']}, "
         f"failed={summary['counts']['failed']}, skipped={summary['counts']['skipped']}, "
-        f"results={out_file}."
+        f"dry_run={summary['counts']['dry_run']}. "
+        f"Per-student files: handin+handback output.log / grade_meta.json."
+    )
+    click.echo(
+        f"\n=== Grade run {run_id} complete ===\n"
+        f"  ok={summary['counts']['ok']}  failed={summary['counts']['failed']}  "
+        f"skipped={summary['counts']['skipped']}  dry_run={summary['counts']['dry_run']}\n"
+        f"  Durable paths: {HANDIN_REVIEW_ROOT}/… and {HANDBACK_REVIEW_ROOT}/… "
+        f"(students see handback, read-only)."
     )
     return summary
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -1220,13 +1783,41 @@ def nv_grade():
     "--target-folder",
     required=True,
     type=click.Path(),
-    help="Destination for collected trees + nvcollect_manifest.json.",
+    help=(
+        "Destination for collected trees + nvcollect_manifest.json. "
+        "Submission folders are renamed to student email when --org/--space given."
+    ),
 )
-def nv_grade_collect(assignment_name, assignment_folder, target_folder):
+@click.option("--org", "-o", default=None, help="Organization slug (for email folder rename).")
+@click.option("--space", "-s", default=None, help="Space slug (for email folder rename).")
+def nv_grade_collect(assignment_name, assignment_folder, target_folder, org, space):
     """Collect submissions by calling nuvolos_collect.collect in-process."""
     check_api_key_configured()
-    collect_submissions(assignment_name, assignment_folder, target_folder)
+    org_slug = org
+    space_slug = space
+    if not org_slug or not space_slug:
+        try:
+            context = json.loads(os.environ.get("NV_CONTEXT", "") or "{}")
+        except json.JSONDecodeError:
+            context = {}
+        if isinstance(context, dict):
+            org_slug = org_slug or context.get("org_slug") or context.get("org")
+            space_slug = space_slug or context.get("space_slug") or context.get("space")
+    collect_submissions(
+        assignment_name,
+        assignment_folder,
+        target_folder,
+        org_slug=org_slug,
+        space_slug=space_slug,
+    )
+    if not (org_slug and space_slug):
+        clog.warning(
+            "Collect finished without org/space; submission folders kept as instance "
+            "slugs. Pass --org/--space (or run from NV_CONTEXT) to rename to email."
+        )
     click.echo(f"Collect completed into {target_folder}")
+
+
 
 
 @nv_grade.command("resolve-manifest")
@@ -1263,6 +1854,7 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     rows = [
         [
             s["instance_slug"],
+            s.get("email") or s.get("folder_name") or "",
             s.get("instance_name") or "",
             "yes" if s["found_in_space"] else "NO",
             s.get("target") or "",
@@ -1272,7 +1864,7 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     click.echo(
         tabulate(
             rows,
-            headers=["instance_slug", "name", "in_space", "target"],
+            headers=["instance_slug", "email", "name", "in_space", "target"],
             tablefmt="github",
         )
     )
@@ -1293,7 +1885,11 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     "--target-folder",
     default=None,
     type=click.Path(),
-    help="nvcollect output dir (manifest written here). Required unless --skip-collect with --manifest.",
+    hidden=True,
+    help=(
+        "Deprecated. With --skip-collect only: optional path to an existing collect tree. "
+        "Final grade artifacts always go to assignments-review handin/handback."
+    ),
 )
 @click.option("--org", "-o", required=True, help="Organization slug.")
 @click.option("--space", "-s", required=True, help="Space slug.")
@@ -1331,24 +1927,26 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
 @click.option(
     "--results-dir",
     "-r",
-    required=True,
+    default=None,
+    required=False,
+    hidden=True,
     type=click.Path(),
     help=(
-        "Instructor-side directory for grade_run_*.json and per-student "
-        "output.log / error.log (under results-dir/<run_id>/<instance>/)."
+        "Optional staging override (default /files/.nuvolos_grade). "
+        "Durable output is always under assignments-review handin/handback."
     ),
 )
 @click.option(
     "--skip-collect",
     is_flag=True,
-    help="Do not collect; use existing --manifest or --target-folder manifest.",
+    help="Do not collect; use existing --manifest or --target-folder tree.",
 )
 @click.option(
     "--manifest",
     "-m",
     default=None,
     type=click.Path(exists=True),
-    help="With --skip-collect: path to manifest file or collect dir.",
+    help="With --skip-collect: path to manifest file or prior results run dir.",
 )
 @click.option("--dry-run", is_flag=True, help="Plan only; no start/execute/stop.")
 @click.option(
@@ -1389,8 +1987,8 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     default=True,
     show_default=True,
     help=(
-        "After execute, copy output/error logs from each student instance "
-        "onto the instructor instance and into --results-dir."
+        "After execute, pull output.log and publish into handin/handback "
+        "(student-visible, read-only under handback)."
     ),
 )
 @click.option(
@@ -1420,7 +2018,7 @@ def nv_grade_check(
     pull_logs,
     instructor_instance,
 ):
-    """Collect, run --command on each student app, pull logs to instructor."""
+    """Collect, run --command, publish results into handin/handback (no --results-dir needed)."""
     _validate_grade_environment(org, space)
     if grade_all:
         limit = None
@@ -1434,7 +2032,6 @@ def nv_grade_check(
             for name, val in (
                 ("--assignment-name", assignment_name),
                 ("--assignment-folder", assignment_folder),
-                ("--target-folder", target_folder),
             )
             if not val
         ]
@@ -1466,12 +2063,51 @@ def nv_grade_check(
         instructor_instance_slug=instructor_instance,
     )
 
-    click.echo(json.dumps(summary["counts"], indent=2))
-    click.echo(f"results_file: {summary.get('results_file')}")
-    click.echo(f"results_run_dir: {summary.get('results_run_dir')}")
+    # Instructor-facing detailed report (no separate grade_run_*.json file).
+    click.echo("\n" + "=" * 72)
+    click.echo(f"GRADE CHECK SUMMARY  run_id={summary.get('run_id')}")
+    click.echo("=" * 72)
+    click.echo(json.dumps(summary.get("counts") or {}, indent=2))
+    click.echo("-" * 72)
+    for rec in summary.get("students") or []:
+        slug = rec.get("instance_slug") or "?"
+        email = rec.get("email") or rec.get("folder_name") or ""
+        status = rec.get("status")
+        exit_code = (rec.get("execute") or {}).get("exit_code")
+        err = rec.get("error") or ""
+        pub = rec.get("handin_publish") or {}
+        click.echo(f"\n• {email or slug}")
+        click.echo(f"    instance : {slug}")
+        click.echo(f"    status   : {status}" + (f"  exit_code={exit_code}" if exit_code is not None else ""))
+        if err:
+            click.echo(f"    error    : {err}")
+        if pub.get("handin_dir"):
+            click.echo(f"    handin   : {pub.get('handin_dir')}")
+        if pub.get("handback_dir"):
+            click.echo(f"    handback : {pub.get('handback_dir')}  (student-visible, read-only)")
+        for fpath in pub.get("files") or []:
+            click.echo(f"    file     : {fpath}")
+        logs = rec.get("instructor_logs") or {}
+        out_path = (logs.get("local_paths") or {}).get("output.log")
+        if out_path:
+            click.echo(f"    log      : {out_path}")
+        # Re-print full log at the end so instructors can scroll one place.
+        text = (logs.get("log_excerpts") or {}).get("output.log")
+        truncated = (logs.get("log_truncated") or {}).get("output.log")
+        if text:
+            label = " (truncated)" if truncated else ""
+            ban = f"----- output.log [{email or slug}]{label} -----"
+            click.echo(ban)
+            click.echo(text if text.endswith("\n") else text + "\n")
+            click.echo("-" * len(ban))
+    hb = summary.get("handback") or {}
+    if hb:
+        click.echo(f"\nhandback batch: status={hb.get('status')!r} error={hb.get('error')!r}")
+    click.echo("=" * 72 + "\n")
 
     if summary["counts"]["failed"] and not dry_run:
         raise ClickException(
             f"Grade run finished with {summary['counts']['failed']} failure(s). "
-            f"See {summary.get('results_file')}"
+            f"See per-student handin/handback output.log above."
         )
+
