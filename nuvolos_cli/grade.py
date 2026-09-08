@@ -44,7 +44,7 @@ HANDBACK_REVIEW_ROOT = "/files/assignments-review/handback"
 # Ephemeral staging only (execute + distribute). Durable output is handin/handback.
 DEFAULT_GRADE_WORK_ROOT = "/files/.nuvolos_grade"
 GRADE_META_FILENAME = "grade_meta.json"
-GRADE_RUNS_HANDBACK_SUBDIR = "_nuvolos_grade_runs"
+
 
 
 
@@ -944,7 +944,7 @@ def _files_area_entry_exists(
 
 
 
-def _read_text_if_exists(path: Path, max_bytes: int = 512_000) -> str | None:
+def _read_text_if_exists(path: Path, max_bytes: int = 5_000_000) -> str | None:
     try:
         if not path.is_file():
             return None
@@ -1266,6 +1266,7 @@ def test_one_student(
             clog.info(
                 f"[{instance_slug}] pulling logs to instructor ({reason})."
             )
+            click.echo(f">>> [{instance_slug}] pulling logs ({reason})…")
             record["instructor_logs"] = pull_student_logs_to_instructor(
                 org_slug=org_slug,
                 space_slug=space_slug,
@@ -1278,22 +1279,46 @@ def test_one_student(
                 instructor_instance_slug=instructor_instance_slug,
             )
             logs_pulled = True
-            excerpts = (record["instructor_logs"] or {}).get("log_excerpts") or {}
+            pull = record["instructor_logs"] or {}
+            clog.info(
+                f"[{instance_slug}] log pull status={pull.get('status')!r} "
+                f"work_dir={pull.get('work_dir')!r} "
+                f"local_paths={list((pull.get('local_paths') or {}).keys())}"
+            )
+            if pull.get("error"):
+                clog.warning(f"[{instance_slug}] log pull note: {pull.get('error')}")
+            excerpts = pull.get("log_excerpts") or {}
             out_ex = excerpts.get("output.log")
-            if out_ex:
+            if out_ex is not None:
+                # Full student command output for the instructor CLI.
+                ban = f"===== [{instance_slug}] output.log (full) ====="
+                click.echo(ban)
+                click.echo(out_ex if out_ex.endswith("\n") else out_ex + "\n")
+                click.echo("=" * len(ban))
                 clog.info(
-                    f"[{instance_slug}] output.log (excerpt):\n{out_ex[:4000]}"
+                    f"[{instance_slug}] output.log length={len(out_ex)} chars "
+                    f"(printed in full above)."
+                )
+            else:
+                click.echo(
+                    f">>> [{instance_slug}] no output.log content available after pull "
+                    f"(status={pull.get('status')!r})."
                 )
         except Exception as pull_exc:
             clog.error(
                 f"[{instance_slug}] log pull failed ({reason}): {pull_exc}"
             )
+            click.echo(f"!!! [{instance_slug}] log pull failed: {pull_exc}")
             record["instructor_logs"] = {
                 "status": "failed",
                 "error": str(pull_exc),
             }
 
+
     try:
+        click.echo(
+            f"\n>>> [{instance_slug}] ({folder}) starting app [{app_slug}] (1/5)…"
+        )
         clog.info(f"[{instance_slug}] starting app [{app_slug}] (1/5).")
         start_app(
             org_slug=org_slug,
@@ -1303,6 +1328,7 @@ def test_one_student(
             node_pool=None,
         )
         started = True
+        click.echo(f">>> [{instance_slug}] waiting until app is RUNNING…")
         wait_for_app_running(
             org_slug=org_slug,
             space_slug=space_slug,
@@ -1310,6 +1336,7 @@ def test_one_student(
             app_slug=app_slug,
         )
         clog.info(f"[{instance_slug}] app is running (2/5).")
+        click.echo(f">>> [{instance_slug}] app is RUNNING (2/5).")
         if not run_id or results_root is None:
             raise ClickException(
                 f"[{instance_slug}] internal error: run_id and results_root "
@@ -1323,6 +1350,8 @@ def test_one_student(
             output_log=output_log,
         )
         clog.info(f"[{instance_slug}] executing command (3/5): {command!r}")
+        click.echo(f">>> [{instance_slug}] executing (3/5): {command!r}")
+        click.echo(f"    log path on student: {output_log}")
         exec_result = execute_command_in_app(
             org_slug=org_slug,
             space_slug=space_slug,
@@ -1331,13 +1360,15 @@ def test_one_student(
             command=wrapped_command,
         )
         record["execute"] = _serialize_execute_result(exec_result)
-        # Grade owns this path (wrapper merges stdout+stderr into one file).
         record["execute"]["output_path"] = output_log
         record["execute"].pop("error_path", None)
         record["execute"]["done_file"] = done_file
         record["execute"]["submitted_command"] = command
-        # Execute returns 202 immediately; wait for the done-file before
-        # treating the run as finished, pulling logs, or stopping the app.
+        clog.info(
+            f"[{instance_slug}] execute accepted; waiting for completion "
+            f"(done_file={done_file})."
+        )
+        click.echo(f">>> [{instance_slug}] waiting for command completion…")
         exit_code = _wait_for_execute_completion(
             org_slug=org_slug,
             space_slug=space_slug,
@@ -1351,11 +1382,14 @@ def test_one_student(
             clog.error(
                 f"[{instance_slug}] command failed (4/5): exit_code={exit_code}."
             )
+            click.echo(f"!!! [{instance_slug}] command FAILED exit_code={exit_code}")
         else:
             record["status"] = "executed"
             clog.info(f"[{instance_slug}] command completed (4/5).")
+            click.echo(f">>> [{instance_slug}] command OK exit_code=0 (4/5).")
 
         _try_pull_logs("after command completion")
+
 
 
     except Exception as exc:
@@ -1677,34 +1711,25 @@ def run_grade_check(
         collect_for_handback = summary.get("target_folder") or run_results_abs
         summary["handback"] = handback_collected_results(collect_for_handback)
 
-    # Durable run summary under handback (instructor + tooling); staging copy too.
-    durable_run_dir = (
-        Path(HANDBACK_REVIEW_ROOT) / GRADE_RUNS_HANDBACK_SUBDIR / run_id
-    )
-    try:
-        durable_run_dir.mkdir(parents=True, exist_ok=True)
-        out_file = durable_run_dir / f"grade_run_{run_id}.json"
-    except OSError:
-        out_file = Path(run_results_abs) / f"grade_run_{run_id}.json"
-    with out_file.open("w", encoding="utf-8") as fh:
-        json.dump(summary, fh, indent=2, default=str)
-    # Keep a staging copy when durable path differs.
-    staging_summary = Path(run_results_abs) / f"grade_run_{run_id}.json"
-    if staging_summary.resolve() != Path(out_file).resolve():
-        try:
-            staging_summary.write_text(
-                json.dumps(summary, indent=2, default=str), encoding="utf-8"
-            )
-        except OSError:
-            pass
-    summary["results_file"] = str(out_file)
-    summary["results_run_dir"] = str(durable_run_dir if out_file.parent == durable_run_dir else run_results_abs)
+    # No _nuvolos_grade_runs / grade_run_*.json — durable artifacts are only
+    # per-student output.log + grade_meta.json under handin/handback.
+    summary.pop("results_file", None)
+    summary.pop("results_run_dir", None)
     clog.info(
         f"Grade run complete: ok={summary['counts']['ok']}, "
         f"failed={summary['counts']['failed']}, skipped={summary['counts']['skipped']}, "
-        f"results={out_file} (handin/handback per student)."
+        f"dry_run={summary['counts']['dry_run']}. "
+        f"Per-student files: handin+handback output.log / grade_meta.json."
+    )
+    click.echo(
+        f"\n=== Grade run {run_id} complete ===\n"
+        f"  ok={summary['counts']['ok']}  failed={summary['counts']['failed']}  "
+        f"skipped={summary['counts']['skipped']}  dry_run={summary['counts']['dry_run']}\n"
+        f"  Durable paths: {HANDIN_REVIEW_ROOT}/… and {HANDBACK_REVIEW_ROOT}/… "
+        f"(students see handback, read-only)."
     )
     return summary
+
 
 
 
@@ -2013,13 +2038,50 @@ def nv_grade_check(
         instructor_instance_slug=instructor_instance,
     )
 
-    click.echo(json.dumps(summary["counts"], indent=2))
-    click.echo(f"results_file: {summary.get('results_file')}")
-    click.echo(f"results_run_dir: {summary.get('results_run_dir')}")
+    # Instructor-facing detailed report (no separate grade_run_*.json file).
+    click.echo("\n" + "=" * 72)
+    click.echo(f"GRADE CHECK SUMMARY  run_id={summary.get('run_id')}")
+    click.echo("=" * 72)
+    click.echo(json.dumps(summary.get("counts") or {}, indent=2))
+    click.echo("-" * 72)
+    for rec in summary.get("students") or []:
+        slug = rec.get("instance_slug") or "?"
+        email = rec.get("email") or rec.get("folder_name") or ""
+        status = rec.get("status")
+        exit_code = (rec.get("execute") or {}).get("exit_code")
+        err = rec.get("error") or ""
+        pub = rec.get("handin_publish") or {}
+        click.echo(f"\n• {email or slug}")
+        click.echo(f"    instance : {slug}")
+        click.echo(f"    status   : {status}" + (f"  exit_code={exit_code}" if exit_code is not None else ""))
+        if err:
+            click.echo(f"    error    : {err}")
+        if pub.get("handin_dir"):
+            click.echo(f"    handin   : {pub.get('handin_dir')}")
+        if pub.get("handback_dir"):
+            click.echo(f"    handback : {pub.get('handback_dir')}  (student-visible, read-only)")
+        for fpath in pub.get("files") or []:
+            click.echo(f"    file     : {fpath}")
+        logs = rec.get("instructor_logs") or {}
+        out_path = (logs.get("local_paths") or {}).get("output.log")
+        if out_path:
+            click.echo(f"    log      : {out_path}")
+        # Re-print full log at the end so instructors can scroll one place.
+        text = (logs.get("log_excerpts") or {}).get("output.log")
+        if text:
+            ban = f"----- output.log [{email or slug}] -----"
+            click.echo(ban)
+            click.echo(text if text.endswith("\n") else text + "\n")
+            click.echo("-" * len(ban))
+    hb = summary.get("handback") or {}
+    if hb:
+        click.echo(f"\nhandback batch: status={hb.get('status')!r} error={hb.get('error')!r}")
+    click.echo("=" * 72 + "\n")
 
     if summary["counts"]["failed"] and not dry_run:
         raise ClickException(
             f"Grade run finished with {summary['counts']['failed']} failure(s). "
-            f"See {summary.get('results_file')}"
+            f"See per-student handin/handback output.log above."
         )
+
 
