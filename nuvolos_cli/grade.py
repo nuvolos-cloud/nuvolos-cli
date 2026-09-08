@@ -60,6 +60,11 @@ def _as_files_abs_path(path: str | Path) -> str:
     # Prefer the shared /files mount form (drop resolve()-only host paths).
     if not text.startswith("/files/") and "/files/" in text:
         text = "/files/" + text.split("/files/", 1)[1]
+    if text != "/files" and not text.startswith("/files/"):
+        raise ClickException(
+            "results_dir must be under /files for student→instructor log distribution, got: "
+            + text
+        )
     return text
 
 
