@@ -209,8 +209,11 @@ def collect_submissions(
     assignment_name: str,
     assignment_folder: str,
     target_folder: str,
+    *,
+    org_slug: str | None = None,
+    space_slug: str | None = None,
 ) -> int:
-    """Run nvcollect collect() in-process."""
+    """Run nvcollect collect() in-process, then rename dirs to student email."""
     clog.info(
         f"Collecting submissions: assignment={assignment_name!r}, "
         f"folder={assignment_folder!r}, destination={target_folder}."
@@ -222,7 +225,11 @@ def collect_submissions(
     if code not in (0, None):
         raise ClickException(f"Collect failed with code {code}")
     clog.info(f"Collect completed into {target_folder}")
+    if org_slug and space_slug:
+        relabel_collect_targets_by_email(target_folder, org_slug, space_slug)
     return 0
+
+
 
 
 def read_manifest(manifest_path: str | Path) -> dict:
@@ -261,26 +268,159 @@ def read_manifest(manifest_path: str | Path) -> dict:
     return data
 
 
-def instance_slug_from_item(item: dict) -> str:
-    """Derive instance_slug from a nvcollect manifest item."""
-    if not isinstance(item, dict):
-        raise ClickException(f"Manifest item must be an object, got {type(item)!r}")
-
-    target = item.get("target") or ""
-    if target:
-        slug = Path(str(target).rstrip("/")).name
-        if slug:
-            return slug
-
-    src = item.get("src") or ""
+def instance_slug_from_handin_src(src: str | None) -> str | None:
+    """Extract instance slug from nvcollect handin src path."""
+    if not src:
+        return None
     parts = Path(str(src)).parts
     try:
         handin_idx = parts.index("handin")
-        return parts[handin_idx + 1]
-    except (ValueError, IndexError) as exc:
-        raise ClickException(
-            f"Cannot derive instance_slug from manifest item: {item!r}"
-        ) from exc
+        slug = parts[handin_idx + 1]
+        return slug or None
+    except (ValueError, IndexError):
+        return None
+
+
+def instance_slug_from_item(item: dict) -> str:
+    """Derive instance_slug from a nvcollect manifest item.
+
+    Prefer the handin ``src`` path (stable after email folder rename). Fall back
+    to the target basename for older manifests.
+    """
+    if not isinstance(item, dict):
+        raise ClickException(f"Manifest item must be an object, got {type(item)!r}")
+
+    slug = instance_slug_from_handin_src(item.get("src"))
+    if slug:
+        return slug
+
+    target = item.get("target") or ""
+    if target:
+        name = Path(str(target).rstrip("/")).name
+        if name:
+            return name
+
+    raise ClickException(f"Cannot derive instance_slug from manifest item: {item!r}")
+
+
+def _manifest_file_path(target_folder: str | Path) -> Path:
+    path = Path(target_folder).expanduser()
+    if path.is_file():
+        return path
+    return path / MANIFEST_FILENAME
+
+
+def relabel_collect_targets_by_email(
+    target_folder: str | Path,
+    org_slug: str,
+    space_slug: str,
+) -> dict:
+    """Rename collected submission dirs from instance_slug → student email.
+
+    nvcollect writes ``<target>/<instance_slug>/``. After collect, rename each
+    tree to ``<target>/<student-email>/`` and rewrite ``nvcollect_manifest.json``
+    targets accordingly. Idempotent when folders are already email-named.
+    """
+    root = Path(target_folder).expanduser()
+    if not root.is_dir():
+        raise ClickException(f"Collect target folder not found: {root}")
+
+    manifest_path = _manifest_file_path(root)
+    data = read_manifest(root)
+    items = list(data.get("items") or [])
+    if not items:
+        clog.info("No collect items to relabel by email.")
+        return data
+
+    instances = list_instances(org_slug=org_slug, space_slug=space_slug)
+    by_slug: dict[str, dict] = {}
+    for inst in instances:
+        d = _model_to_dict(inst) if not isinstance(inst, dict) else inst
+        slug = d.get("slug") or d.get("short_id")
+        if slug:
+            by_slug[str(slug)] = d
+
+    used_folders: set[str] = set()
+    new_items: list[dict] = []
+    renamed = 0
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        slug = instance_slug_from_item(item)
+        meta = by_slug.get(slug)
+        email = _email_from_instance_meta(meta)
+        folder = _safe_student_folder_name(
+            email or (meta or {}).get("name"),
+            slug,
+        )
+        # Avoid two students collapsing into one directory name.
+        base_folder = folder
+        n = 2
+        while folder in used_folders:
+            folder = f"{base_folder}_{n}"
+            n += 1
+        used_folders.add(folder)
+
+        old_target = str(item.get("target") or "").rstrip("/")
+        old_dir = Path(old_target) if old_target else root / slug
+        if not old_dir.is_absolute():
+            old_dir = root / old_dir.name
+        # If target was relative-ish, prefer sibling under root by basename.
+        if old_dir.parent != root and (root / old_dir.name).exists():
+            candidate = root / old_dir.name
+            if candidate.is_dir():
+                old_dir = candidate
+        if not old_dir.exists():
+            # Try slug dir under root (fresh nvcollect layout).
+            alt = root / slug
+            if alt.is_dir():
+                old_dir = alt
+
+        new_dir = root / folder
+        new_target = str(new_dir) + "/"
+
+        if old_dir.resolve() != new_dir.resolve():
+            if not old_dir.exists():
+                clog.warning(
+                    f"Collect folder missing for {slug} (expected {old_dir}); "
+                    f"manifest target will still use {folder}."
+                )
+            elif new_dir.exists():
+                clog.warning(
+                    f"Email folder already exists ({new_dir}); leaving {old_dir} in place."
+                )
+                new_target = str(old_dir) + "/"
+                folder = old_dir.name
+            else:
+                clog.info(f"Renaming collect {old_dir.name} → {folder}")
+                old_dir.rename(new_dir)
+                renamed += 1
+
+        new_items.append(
+            {
+                **item,
+                "target": new_target,
+                "instance_slug": slug,
+                "email": email,
+                "folder_name": folder,
+            }
+        )
+
+    data["items"] = new_items
+    data.setdefault("meta", {})
+    data["meta"]["relabeled_by_email"] = True
+    data["meta"]["relabel_time"] = _utc_now_iso()
+
+    with manifest_path.open("w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+    clog.info(
+        f"Collect tree under {root}: {renamed} folder(s) renamed to student email; "
+        f"manifest updated ({manifest_path.name})."
+    )
+    return data
+
+
 
 
 def expand_command_template(
@@ -1071,11 +1211,18 @@ def run_grade_check(
                 "and --target-folder (or pass --skip-collect with --manifest)."
             )
         if not dry_run:
-            collect_submissions(assignment_name, assignment_folder, target_folder)
+            collect_submissions(
+                assignment_name,
+                assignment_folder,
+                target_folder,
+                org_slug=org_slug,
+                space_slug=space_slug,
+            )
         else:
             clog.info(
                 f"[dry-run] would collect assignment_name={assignment_name!r} "
-                f"assignment_folder={assignment_folder!r} target_folder={target_folder!r}"
+                f"assignment_folder={assignment_folder!r} target_folder={target_folder!r} "
+                f"and rename submission folders to student email"
             )
         manifest_source = target_folder
     else:
@@ -1085,6 +1232,9 @@ def run_grade_check(
                 "--skip-collect requires --manifest or --target-folder "
                 "pointing at an existing collect output."
             )
+        # Existing collect trees may still use instance_slug folder names.
+        if not dry_run and target_folder and Path(target_folder).is_dir():
+            relabel_collect_targets_by_email(target_folder, org_slug, space_slug)
 
     if skip_collect or not dry_run:
         manifest = read_manifest(manifest_source)
@@ -1094,6 +1244,7 @@ def run_grade_check(
         except ClickException:
             clog.warning("No existing manifest for dry-run; student list is empty.")
             manifest = {"meta": {}, "items": []}
+
 
     students = resolve_students(
         manifest,
@@ -1288,13 +1439,41 @@ def nv_grade():
     "--target-folder",
     required=True,
     type=click.Path(),
-    help="Destination for collected trees + nvcollect_manifest.json.",
+    help=(
+        "Destination for collected trees + nvcollect_manifest.json. "
+        "Submission folders are renamed to student email when --org/--space given."
+    ),
 )
-def nv_grade_collect(assignment_name, assignment_folder, target_folder):
+@click.option("--org", "-o", default=None, help="Organization slug (for email folder rename).")
+@click.option("--space", "-s", default=None, help="Space slug (for email folder rename).")
+def nv_grade_collect(assignment_name, assignment_folder, target_folder, org, space):
     """Collect submissions by calling nuvolos_collect.collect in-process."""
     check_api_key_configured()
-    collect_submissions(assignment_name, assignment_folder, target_folder)
+    org_slug = org
+    space_slug = space
+    if not org_slug or not space_slug:
+        try:
+            context = json.loads(os.environ.get("NV_CONTEXT", "") or "{}")
+        except json.JSONDecodeError:
+            context = {}
+        if isinstance(context, dict):
+            org_slug = org_slug or context.get("org_slug") or context.get("org")
+            space_slug = space_slug or context.get("space_slug") or context.get("space")
+    collect_submissions(
+        assignment_name,
+        assignment_folder,
+        target_folder,
+        org_slug=org_slug,
+        space_slug=space_slug,
+    )
+    if not (org_slug and space_slug):
+        clog.warning(
+            "Collect finished without org/space; submission folders kept as instance "
+            "slugs. Pass --org/--space (or run from NV_CONTEXT) to rename to email."
+        )
     click.echo(f"Collect completed into {target_folder}")
+
+
 
 
 @nv_grade.command("resolve-manifest")
