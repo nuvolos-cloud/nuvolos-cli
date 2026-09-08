@@ -44,6 +44,10 @@ HANDBACK_REVIEW_ROOT = "/files/assignments-review/handback"
 # Ephemeral staging only (execute + distribute). Durable output is handin/handback.
 DEFAULT_GRADE_WORK_ROOT = "/files/.nuvolos_grade"
 GRADE_META_FILENAME = "grade_meta.json"
+# Grading artifacts (output.log, grade_meta.json) are published under a
+# dedicated child directory so they never collide with identically named
+# files already present in a student's submission.
+GRADE_ARTIFACTS_DIRNAME = "_grading"
 
 
 
@@ -56,10 +60,11 @@ def _as_files_abs_path(path: str | Path) -> str:
     p = Path(path).expanduser()
     if not p.is_absolute():
         p = Path("/files") / p
-    text = str(p)
+    text = os.path.normpath(str(p))
     # Prefer the shared /files mount form (drop resolve()-only host paths).
     if not text.startswith("/files/") and "/files/" in text:
         text = "/files/" + text.split("/files/", 1)[1]
+        text = os.path.normpath(text)
     if text != "/files" and not text.startswith("/files/"):
         raise ClickException(
             "results_dir must be under /files for student→instructor log distribution, got: "
@@ -571,14 +576,12 @@ def publish_student_results_to_handin_structure(
 
     published: list[str] = []
     for dest_dir in destinations:
+        artifacts_dir = dest_dir / GRADE_ARTIFACTS_DIRNAME
         for art in artifact_files:
-            copied = _safe_copy_into(art, dest_dir)
+            copied = _safe_copy_into(art, artifacts_dir)
             if copied is not None:
                 published.append(str(copied))
                 _chmod_tree_readonly(copied)
-        # Mark destination tree read-only for feedback files (best-effort).
-        if dest_dir == handback_dir:
-            _chmod_tree_readonly(dest_dir)
 
     pub["files"] = published
     if not published:
@@ -677,7 +680,9 @@ def resolve_students(
         meta = by_slug.get(slug)
         instance_name = (meta or {}).get("name")
         email = _email_from_instance_meta(meta)
-        folder_name = _safe_student_folder_name(email or instance_name, slug)
+        folder_name = item.get("folder_name") or _safe_student_folder_name(
+            email or instance_name, slug
+        )
         students.append({
             "index": idx,
             "instance_slug": slug,
@@ -940,12 +945,16 @@ def _files_area_entry_exists(
 
 
 
-def _read_text_if_exists(path: Path, max_bytes: int = 5_000_000) -> str | None:
+def _read_text_if_exists(path: Path, max_bytes: int = 5_000_000) -> tuple[str, bool] | None:
+    """Read a text file's contents; returns ``(text, truncated)`` or None if missing."""
     try:
         if not path.is_file():
             return None
-        data = path.read_bytes()[:max_bytes]
-        return data.decode("utf-8", errors="replace")
+        data = path.read_bytes()
+        truncated = len(data) > max_bytes
+        if truncated:
+            data = data[:max_bytes]
+        return data.decode("utf-8", errors="replace"), truncated
     except OSError:
         return None
 
@@ -975,6 +984,7 @@ def pull_student_logs_to_instructor(
         "instructor_paths": {},
         "local_paths": {},
         "log_excerpts": {},
+        "log_truncated": {},
         "error": None,
     }
     out_p = execute_info.get("output_path")
@@ -1144,7 +1154,11 @@ def pull_student_logs_to_instructor(
                 # Already at final results-dir location; no secondary copy.
                 pull["local_paths"][name] = str(instructor_path)
                 if name.endswith(".log"):
-                    pull["log_excerpts"][name] = _read_text_if_exists(instructor_path)
+                    read_result = _read_text_if_exists(instructor_path)
+                    if read_result is not None:
+                        text, truncated = read_result
+                        pull["log_excerpts"][name] = text
+                        pull["log_truncated"][name] = truncated
             else:
                 clog.warning(
                     f"[{student_instance_slug}] expected instructor file missing: "
@@ -1274,8 +1288,8 @@ def test_one_student(
                 results_dir=Path(results_root),
                 instructor_instance_slug=instructor_instance_slug,
             )
-            logs_pulled = True
             pull = record["instructor_logs"] or {}
+            logs_pulled = pull.get("status") == "pulled"
             clog.info(
                 f"[{instance_slug}] log pull status={pull.get('status')!r} "
                 f"work_dir={pull.get('work_dir')!r} "
@@ -1285,15 +1299,16 @@ def test_one_student(
                 clog.warning(f"[{instance_slug}] log pull note: {pull.get('error')}")
             excerpts = pull.get("log_excerpts") or {}
             out_ex = excerpts.get("output.log")
+            out_truncated = (pull.get("log_truncated") or {}).get("output.log")
             if out_ex is not None:
-                # Full student command output for the instructor CLI.
-                ban = f"===== [{instance_slug}] output.log (full) ====="
+                label = "(truncated)" if out_truncated else "(full)"
+                ban = f"===== [{instance_slug}] output.log {label} ====="
                 click.echo(ban)
                 click.echo(out_ex if out_ex.endswith("\n") else out_ex + "\n")
                 click.echo("=" * len(ban))
                 clog.info(
                     f"[{instance_slug}] output.log length={len(out_ex)} chars "
-                    f"(printed in full above)."
+                    + ("(truncated above)." if out_truncated else "(printed in full above).")
                 )
             else:
                 click.echo(
@@ -1702,10 +1717,20 @@ def run_grade_check(
                 clog.warning(
                     f"[{rec.get('instance_slug')}] handin publish failed: {exc}"
                 )
+            publish_error = (rec.get("handin_publish") or {}).get("error")
+            if publish_error and rec.get("status") == "ok":
+                rec["status"] = "failed"
+                rec["error"] = rec.get("error") or f"publish failed: {publish_error}"
+                summary["counts"]["ok"] -= 1
+                summary["counts"]["failed"] += 1
 
         # Full-tree handback so students see feedback in the assignment UI (readonly).
         collect_for_handback = summary.get("target_folder") or run_results_abs
+        if collect_for_handback and Path(collect_for_handback).expanduser().is_file():
+            collect_for_handback = str(Path(collect_for_handback).expanduser().parent)
         summary["handback"] = handback_collected_results(collect_for_handback)
+        if summary["handback"].get("status") == "failed":
+            summary["counts"]["failed"] += 1
 
     # No _nuvolos_grade_runs / grade_run_*.json — durable artifacts are only
     # per-student output.log + grade_meta.json under handin/handback.
@@ -2064,8 +2089,10 @@ def nv_grade_check(
             click.echo(f"    log      : {out_path}")
         # Re-print full log at the end so instructors can scroll one place.
         text = (logs.get("log_excerpts") or {}).get("output.log")
+        truncated = (logs.get("log_truncated") or {}).get("output.log")
         if text:
-            ban = f"----- output.log [{email or slug}] -----"
+            label = " (truncated)" if truncated else ""
+            ban = f"----- output.log [{email or slug}]{label} -----"
             click.echo(ban)
             click.echo(text if text.endswith("\n") else text + "\n")
             click.echo("-" * len(ban))
