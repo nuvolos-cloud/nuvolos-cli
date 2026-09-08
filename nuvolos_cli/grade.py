@@ -150,15 +150,6 @@ def _wrap_command_with_done_file(
         f": > \"$work/.cmd_exit.$ec\"\n"
         f"exit \"$ec\""
     )
-
-
-
-
-
-
-
-
-
 def _require_teaching_master(org_slug: str, space_slug: str) -> None:
     """Require the current context to be a teaching-space master instance."""
     try:
@@ -2088,5 +2079,4 @@ def nv_grade_check(
             f"Grade run finished with {summary['counts']['failed']} failure(s). "
             f"See per-student handin/handback output.log above."
         )
-
 
