@@ -39,6 +39,16 @@ import shlex
 
 MANIFEST_FILENAME = "nvcollect_manifest.json"
 TEACHING_SPACE_TYPE = "TEACHING"
+HANDIN_REVIEW_ROOT = "/files/assignments-review/handin"
+HANDBACK_REVIEW_ROOT = "/files/assignments-review/handback"
+# Ephemeral staging only (execute + distribute). Durable output is handin/handback.
+DEFAULT_GRADE_WORK_ROOT = "/files/.nuvolos_grade"
+GRADE_META_FILENAME = "grade_meta.json"
+GRADE_RUNS_HANDBACK_SUBDIR = "_nuvolos_grade_runs"
+
+
+
+
 
 
 def _as_files_abs_path(path: str | Path) -> str:
@@ -421,6 +431,214 @@ def relabel_collect_targets_by_email(
     return data
 
 
+
+
+def _handback_path_from_handin_src(src: str | None) -> str | None:
+    """Map a handin review path to the parallel handback path."""
+    if not src:
+        return None
+    text = str(src)
+    if "/assignments-review/handin" in text:
+        return text.replace(
+            "/assignments-review/handin",
+            "/assignments-review/handback",
+            1,
+        )
+    if text.startswith(HANDIN_REVIEW_ROOT):
+        return HANDBACK_REVIEW_ROOT + text[len(HANDIN_REVIEW_ROOT) :]
+    return None
+
+
+def _chmod_tree_readonly(path: Path) -> None:
+    """Best-effort make files under path read-only (students must not edit feedback)."""
+    if not path.exists():
+        return
+    try:
+        if path.is_file():
+            os.chmod(path, 0o444)
+            return
+        for root, dirs, files in os.walk(path):
+            try:
+                os.chmod(root, 0o555)
+            except OSError:
+                pass
+            for name in files:
+                fp = Path(root) / name
+                try:
+                    os.chmod(fp, 0o444)
+                except OSError:
+                    pass
+    except OSError as exc:
+        clog.debug(f"chmod readonly failed for {path}: {exc}")
+
+
+def _safe_copy_into(src_file: Path, dest_dir: Path, name: str | None = None) -> Path | None:
+    """Copy a file into dest_dir; create parents. Returns dest path or None."""
+    if not src_file.is_file():
+        return None
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / (name or src_file.name)
+    try:
+        shutil.copy2(src_file, dest)
+        return dest
+    except OSError as exc:
+        clog.warning(f"Failed to copy {src_file} → {dest}: {exc}")
+        return None
+
+
+def publish_student_results_to_handin_structure(
+    *,
+    student_record: dict,
+    run_id: str,
+) -> dict:
+    """Copy grade artifacts into handin + handback trees on the instructor FS.
+
+    Layout (existing platform structure)::
+
+        /files/assignments-review/handin/<instance>/<assignment>/<ts>_…/…
+        /files/assignments-review/handback/<instance>/<assignment>/<ts>_…/…
+
+    Handback is what students see (read-only). We also place files under the
+    original handin src folder so instructors viewing handins see the same
+    artifacts next to the submission.
+    """
+    pub = {
+        "handin_dir": None,
+        "handback_dir": None,
+        "files": [],
+        "error": None,
+    }
+    logs = student_record.get("instructor_logs") or {}
+    local_paths = logs.get("local_paths") or {}
+    output_log = local_paths.get("output.log")
+    src = student_record.get("src")
+    target = student_record.get("target")
+
+    # Prefer the handin submission folder from the collect manifest src.
+    handin_dir = Path(str(src)).expanduser() if src else None
+    handback_dir = None
+    hb = _handback_path_from_handin_src(src)
+    if hb:
+        handback_dir = Path(hb)
+
+    # Fallback: collect target folder on instructor.
+    collect_dir = Path(str(target)).expanduser() if target else None
+
+    artifact_files: list[Path] = []
+    if output_log:
+        p = Path(output_log)
+        if p.is_file():
+            artifact_files.append(p)
+
+    # Write a small grade_meta.json next to the log when we have execute info.
+    meta = {
+        "run_id": run_id,
+        "instance_slug": student_record.get("instance_slug"),
+        "email": student_record.get("email") or student_record.get("folder_name"),
+        "status": student_record.get("status"),
+        "error": student_record.get("error"),
+        "exit_code": (student_record.get("execute") or {}).get("exit_code"),
+        "finished_at": student_record.get("finished_at") or _utc_now_iso(),
+        "command": student_record.get("command"),
+    }
+    meta_tmp = None
+    try:
+        work = logs.get("work_dir")
+        meta_dir = Path(work) if work else (
+            collect_dir if collect_dir else Path("/tmp")
+        )
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        meta_tmp = meta_dir / GRADE_META_FILENAME
+        meta_tmp.write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
+        artifact_files.append(meta_tmp)
+    except OSError as exc:
+        clog.debug(f"Could not write grade_meta.json: {exc}")
+
+    destinations: list[Path] = []
+    if handin_dir is not None:
+        destinations.append(handin_dir)
+        pub["handin_dir"] = str(handin_dir)
+    if handback_dir is not None:
+        destinations.append(handback_dir)
+        pub["handback_dir"] = str(handback_dir)
+    # Always keep a copy in the collect/results student folder when present.
+    if collect_dir is not None and collect_dir not in destinations:
+        destinations.append(collect_dir)
+
+    if not destinations:
+        pub["error"] = "No handin/handback/collect destination available"
+        return pub
+
+    if not artifact_files:
+        pub["error"] = "No grade artifact files to publish"
+        return pub
+
+    published: list[str] = []
+    for dest_dir in destinations:
+        for art in artifact_files:
+            copied = _safe_copy_into(art, dest_dir)
+            if copied is not None:
+                published.append(str(copied))
+                _chmod_tree_readonly(copied)
+        # Mark destination tree read-only for feedback files (best-effort).
+        if dest_dir == handback_dir:
+            _chmod_tree_readonly(dest_dir)
+
+    pub["files"] = published
+    if not published:
+        pub["error"] = "Publish copied no files"
+    else:
+        clog.info(
+            f"[{student_record.get('instance_slug')}] published grade artifacts to "
+            f"handin/handback structure ({len(published)} file(s))."
+        )
+    return pub
+
+
+def handback_collected_results(collect_dir: str | Path) -> dict:
+    """Push collect+grade folders into assignments-review/handback via nvcollect.
+
+    Students see handback content in the assignment UI (read-only). Instructor
+    already has the parallel tree under assignments-review/handback after this.
+    """
+    result = {"status": "pending", "error": None}
+    root = Path(collect_dir).expanduser()
+    if not root.is_dir():
+        result["status"] = "skipped"
+        result["error"] = f"collect dir missing: {root}"
+        return result
+    manifest = root / MANIFEST_FILENAME
+    if not manifest.is_file():
+        result["status"] = "skipped"
+        result["error"] = f"no {MANIFEST_FILENAME} in {root}"
+        return result
+    try:
+        _require_nuvolos_collect()
+        from nuvolos_collect.handback import handback as nv_handback
+
+        clog.info(f"Handing back graded results from {root} → assignments-review/handback.")
+        code = nv_handback(str(root))
+        if code not in (0, None):
+            result["status"] = "failed"
+            result["error"] = f"handback returned {code}"
+            return result
+        # Enforce read-only on handback targets listed in manifest.
+        data = read_manifest(root)
+        for item in data.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            hb = item.get("handback_target") or _handback_path_from_handin_src(
+                item.get("src")
+            )
+            if hb:
+                _chmod_tree_readonly(Path(hb))
+        result["status"] = "ok"
+        clog.info("Handback completed; student-visible feedback is read-only under handback.")
+    except Exception as exc:
+        result["status"] = "failed"
+        result["error"] = str(exc)
+        clog.error(f"Handback failed: {exc}")
+    return result
 
 
 def expand_command_template(
@@ -1182,7 +1400,7 @@ def run_grade_check(
     space_slug: str,
     app_slug: str,
     command: str,
-    results_dir: str,
+    results_dir: str | None = None,
     target_folder: str | None = None,
     assignment_name: str | None = None,
     assignment_folder: str | None = None,
@@ -1197,44 +1415,83 @@ def run_grade_check(
     pull_logs: bool = True,
     instructor_instance_slug: str | None = None,
 ) -> dict:
-    """Orchestrator: optional collect → resolve → lifecycle batch → instructor logs."""
+    """Orchestrator: collect → test → publish into handin/handback structure.
+
+    Durable instructor + student artifacts live under the existing assignment
+    review trees (students see **handback**, read-only)::
+
+        /files/assignments-review/handin/<instance>/<assignment>/<ts>_…/
+            output.log
+            grade_meta.json
+        /files/assignments-review/handback/<instance>/<assignment>/<ts>_…/
+            output.log
+            grade_meta.json   # same content, student-visible readonly
+
+    ``results_dir`` is only an optional staging override (default
+    ``/files/.nuvolos_grade``) for execute/distribute scratch space.
+    """
     instructor_instance_slug = instructor_instance_slug or _instructor_instance_slug()
+
+    # Scratch tree for collect + in-app execute/distribute (not the durable store).
+    work_root = _as_files_abs_path(results_dir or DEFAULT_GRADE_WORK_ROOT)
+    work_path = Path(work_root)
+    work_path.mkdir(parents=True, exist_ok=True)
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_results_dir = work_path / run_id
+    run_results_dir.mkdir(parents=True, exist_ok=True)
+    run_results_abs = _as_files_abs_path(run_results_dir)
+
+    collect_dest = run_results_abs
+    if target_folder and not skip_collect:
+        clog.warning(
+            "--target-folder is deprecated for grade check; using internal staging "
+            f"under {run_results_abs}. Final artifacts go to handin/handback."
+        )
+
     clog.info(
         f"Starting grade run for {org_slug}/{space_slug}: app={app_slug}, "
         f"parallel={max(1, parallel)}, dry_run={dry_run}, pull_logs={pull_logs}, "
-        f"instructor_instance={instructor_instance_slug}."
+        f"instructor_instance={instructor_instance_slug}, "
+        f"staging={run_results_abs}, durable=handin+handback."
     )
+
+
     if not skip_collect:
-        if not assignment_name or not assignment_folder or not target_folder:
+        if not assignment_name or not assignment_folder:
             raise ClickException(
-                "Collect requires --assignment-name, --assignment-folder, "
-                "and --target-folder (or pass --skip-collect with --manifest)."
+                "Collect requires --assignment-name and --assignment-folder "
+                "(or pass --skip-collect with --manifest / prior results run dir)."
             )
         if not dry_run:
             collect_submissions(
                 assignment_name,
                 assignment_folder,
-                target_folder,
+                collect_dest,
                 org_slug=org_slug,
                 space_slug=space_slug,
             )
         else:
             clog.info(
                 f"[dry-run] would collect assignment_name={assignment_name!r} "
-                f"assignment_folder={assignment_folder!r} target_folder={target_folder!r} "
-                f"and rename submission folders to student email"
+                f"assignment_folder={assignment_folder!r} into {collect_dest} "
+                f"(student-email folders + later output.log in the same dirs)"
             )
-        manifest_source = target_folder
+        manifest_source = collect_dest
     else:
         manifest_source = manifest_path or target_folder
         if not manifest_source:
             raise ClickException(
                 "--skip-collect requires --manifest or --target-folder "
-                "pointing at an existing collect output."
+                "pointing at an existing collect / prior results run directory."
             )
         # Existing collect trees may still use instance_slug folder names.
-        if not dry_run and target_folder and Path(target_folder).is_dir():
-            relabel_collect_targets_by_email(target_folder, org_slug, space_slug)
+        relabel_root = target_folder or (
+            str(Path(manifest_source).parent)
+            if Path(manifest_source).is_file()
+            else manifest_source
+        )
+        if not dry_run and relabel_root and Path(relabel_root).is_dir():
+            relabel_collect_targets_by_email(relabel_root, org_slug, space_slug)
 
     if skip_collect or not dry_run:
         manifest = read_manifest(manifest_source)
@@ -1245,7 +1502,6 @@ def run_grade_check(
             clog.warning("No existing manifest for dry-run; student list is empty.")
             manifest = {"meta": {}, "items": []}
 
-
     students = resolve_students(
         manifest,
         org_slug,
@@ -1254,14 +1510,6 @@ def run_grade_check(
         limit=limit,
     )
     clog.info(f"Prepared {len(students)} student(s) for grading.")
-    # Keep paths on the shared /files mount so student → instructor distribute
-    # lands in the same tree the instructor reads locally.
-    results_root = _as_files_abs_path(results_dir)
-    results_path = Path(results_root)
-    results_path.mkdir(parents=True, exist_ok=True)
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_results_dir = results_path / run_id
-    run_results_dir.mkdir(parents=True, exist_ok=True)
 
     summary = {
         "run_id": run_id,
@@ -1270,7 +1518,9 @@ def run_grade_check(
         "space_slug": space_slug,
         "app_slug": app_slug,
         "command_template": command,
-        "target_folder": target_folder,
+        "target_folder": collect_dest if not skip_collect else (
+            target_folder or manifest_source
+        ),
         "assignment_name": assignment_name,
         "assignment_folder": assignment_folder,
         "skip_collect": skip_collect,
@@ -1279,8 +1529,11 @@ def run_grade_check(
         "parallel": parallel,
         "pull_logs": pull_logs,
         "instructor_instance_slug": instructor_instance_slug,
-        "results_root": results_root,
-        "results_run_dir": str(run_results_dir),
+        "staging_root": work_root,
+        "staging_run_dir": run_results_abs,
+        "durable_store": f"{HANDIN_REVIEW_ROOT} + {HANDBACK_REVIEW_ROOT}",
+
+
         "counts": {
             "total": len(students),
             "ok": 0,
@@ -1306,7 +1559,8 @@ def run_grade_check(
             ),
             dry_run=dry_run,
             run_id=run_id,
-            results_root=results_root,
+            results_root=work_root,
+
             student_folder=folder,
             instructor_instance_slug=instructor_instance_slug,
             pull_logs=pull_logs,
@@ -1402,16 +1656,56 @@ def run_grade_check(
 
 
     summary["finished_at"] = _utc_now_iso()
-    out_file = results_path / f"grade_run_{run_id}.json"
+
+    # Publish each student's artifacts into handin + handback path structure.
+    if not dry_run:
+        for rec in summary["students"]:
+            if rec.get("status") in ("skipped", "dry_run", "pending"):
+                continue
+            try:
+                rec["handin_publish"] = publish_student_results_to_handin_structure(
+                    student_record=rec,
+                    run_id=run_id,
+                )
+            except Exception as exc:
+                rec["handin_publish"] = {"error": str(exc)}
+                clog.warning(
+                    f"[{rec.get('instance_slug')}] handin publish failed: {exc}"
+                )
+
+        # Full-tree handback so students see feedback in the assignment UI (readonly).
+        collect_for_handback = summary.get("target_folder") or run_results_abs
+        summary["handback"] = handback_collected_results(collect_for_handback)
+
+    # Durable run summary under handback (instructor + tooling); staging copy too.
+    durable_run_dir = (
+        Path(HANDBACK_REVIEW_ROOT) / GRADE_RUNS_HANDBACK_SUBDIR / run_id
+    )
+    try:
+        durable_run_dir.mkdir(parents=True, exist_ok=True)
+        out_file = durable_run_dir / f"grade_run_{run_id}.json"
+    except OSError:
+        out_file = Path(run_results_abs) / f"grade_run_{run_id}.json"
     with out_file.open("w", encoding="utf-8") as fh:
         json.dump(summary, fh, indent=2, default=str)
+    # Keep a staging copy when durable path differs.
+    staging_summary = Path(run_results_abs) / f"grade_run_{run_id}.json"
+    if staging_summary.resolve() != Path(out_file).resolve():
+        try:
+            staging_summary.write_text(
+                json.dumps(summary, indent=2, default=str), encoding="utf-8"
+            )
+        except OSError:
+            pass
     summary["results_file"] = str(out_file)
+    summary["results_run_dir"] = str(durable_run_dir if out_file.parent == durable_run_dir else run_results_abs)
     clog.info(
         f"Grade run complete: ok={summary['counts']['ok']}, "
         f"failed={summary['counts']['failed']}, skipped={summary['counts']['skipped']}, "
-        f"results={out_file}."
+        f"results={out_file} (handin/handback per student)."
     )
     return summary
+
 
 
 # ---------------------------------------------------------------------------
@@ -1541,7 +1835,11 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     "--target-folder",
     default=None,
     type=click.Path(),
-    help="nvcollect output dir (manifest written here). Required unless --skip-collect with --manifest.",
+    hidden=True,
+    help=(
+        "Deprecated. With --skip-collect only: optional path to an existing collect tree. "
+        "Final grade artifacts always go to assignments-review handin/handback."
+    ),
 )
 @click.option("--org", "-o", required=True, help="Organization slug.")
 @click.option("--space", "-s", required=True, help="Space slug.")
@@ -1579,25 +1877,26 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
 @click.option(
     "--results-dir",
     "-r",
-    required=True,
+    default=None,
+    required=False,
+    hidden=True,
     type=click.Path(),
     help=(
-        "Directory for grade_run_*.json and per-student logs "
-        "(layout: results-dir/<run_id>/<student-email>/output.log). "
-        "Prefer a path under /files so student→instructor distribute works."
+        "Optional staging override (default /files/.nuvolos_grade). "
+        "Durable output is always under assignments-review handin/handback."
     ),
 )
 @click.option(
     "--skip-collect",
     is_flag=True,
-    help="Do not collect; use existing --manifest or --target-folder manifest.",
+    help="Do not collect; use existing --manifest or --target-folder tree.",
 )
 @click.option(
     "--manifest",
     "-m",
     default=None,
     type=click.Path(exists=True),
-    help="With --skip-collect: path to manifest file or collect dir.",
+    help="With --skip-collect: path to manifest file or prior results run dir.",
 )
 @click.option("--dry-run", is_flag=True, help="Plan only; no start/execute/stop.")
 @click.option(
@@ -1638,8 +1937,8 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     default=True,
     show_default=True,
     help=(
-        "After execute, copy output/error logs from each student instance "
-        "onto the instructor instance and into --results-dir."
+        "After execute, pull output.log and publish into handin/handback "
+        "(student-visible, read-only under handback)."
     ),
 )
 @click.option(
@@ -1669,7 +1968,7 @@ def nv_grade_check(
     pull_logs,
     instructor_instance,
 ):
-    """Collect, run --command on each student app, pull logs to instructor."""
+    """Collect, run --command, publish results into handin/handback (no --results-dir needed)."""
     _validate_grade_environment(org, space)
     if grade_all:
         limit = None
@@ -1683,7 +1982,6 @@ def nv_grade_check(
             for name, val in (
                 ("--assignment-name", assignment_name),
                 ("--assignment-folder", assignment_folder),
-                ("--target-folder", target_folder),
             )
             if not val
         ]
@@ -1724,3 +2022,4 @@ def nv_grade_check(
             f"Grade run finished with {summary['counts']['failed']} failure(s). "
             f"See {summary.get('results_file')}"
         )
+
