@@ -8,6 +8,7 @@ nav:
     - Launch scaled applications: launch_scaled_apps.md
     - Execute commands: execute_commands.md
     - List running applications: list_running_applications.md
+    - Grading: grading.md
   - Management Documentation:
     - Instance Management: instance_management.md
     - Application Management: app_management.md
