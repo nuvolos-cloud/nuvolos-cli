@@ -97,6 +97,13 @@ See [Distribution Management](distribution_management.md) for detailed usage.
 
 See [LFS Management](lfs_management.md) for detailed usage.
 
+### Grading
+- `nuvolos grade collect` - Collect student hand-ins via nuvolos_collect
+- `nuvolos grade resolve-manifest` - Map collect manifest entries to instance slugs
+- `nuvolos grade check` - Collect (optional), run validation on each student app, pull logs
+
+See [Grading](grading.md) for detailed usage.
+
 ### Task Management
 - `nuvolos tasks get` - Get status of a task by ID
 
