@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import signal
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
-
 import click
 from click import ClickException
 from tabulate import tabulate
@@ -48,6 +50,10 @@ GRADE_META_FILENAME = "grade_meta.json"
 # dedicated child directory so they never collide with identically named
 # files already present in a student's submission.
 GRADE_ARTIFACTS_DIRNAME = "_grading"
+
+# Hold-mode (concurrent evaluation window) state under the grade work root.
+# Used by `grade check --hold-duration` and crash-recovery `grade stop`.
+GRADE_RUN_STATE_FILENAME = "run_state.json"
 
 
 def _as_files_abs_path(path: str | Path) -> str:
@@ -150,6 +156,114 @@ def _wrap_command_with_done_file(
         f": > \"$work/.cmd_exit.$ec\"\n"
         f"exit \"$ec\""
     )
+
+
+def _wrap_command_detached(
+    command: str,
+    *,
+    output_log: str,
+    pid_file: str,
+) -> str:
+    """Background a long-lived process; return immediately (no done-file wait).
+
+    Used by hold-mode evaluation windows where the student app must stay up for
+    an external platform. Prefer images whose primary process is already the
+    server and omit --command when possible.
+    """
+    work = str(Path(output_log).parent)
+    work_q = shlex.quote(work)
+    out_q = shlex.quote(output_log)
+    pid_q = shlex.quote(pid_file)
+    # nohup + background; write pid and exit 0 so the k8s exec returns at once.
+    return (
+        f"work={work_q}\n"
+        f"mkdir -p \"$work\"\n"
+        f"nohup bash -lc {shlex.quote(command)} >>{out_q} 2>&1 & echo $! > {pid_q}\n"
+        f"exit 0"
+    )
+
+
+def _parse_duration_seconds(value: str | int | float | None) -> int | None:
+    """Parse duration like 1800, 30m, 1h, 2h30m into seconds. None/empty → None."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        secs = int(value)
+        if secs < 0:
+            raise ClickException(f"duration must be >= 0, got {value!r}")
+        return secs
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    total = 0
+    matched = False
+    for amount, unit in re.findall(r"(\d+)\s*([smhd])", text):
+        matched = True
+        n = int(amount)
+        if unit == "s":
+            total += n
+        elif unit == "m":
+            total += n * 60
+        elif unit == "h":
+            total += n * 3600
+        elif unit == "d":
+            total += n * 86400
+    if not matched or re.sub(r"[\d\ssmhd]", "", text):
+        raise ClickException(
+            f"Invalid duration {value!r}; use seconds or forms like 30m, 1h, 2h30m"
+        )
+    return total
+
+
+def _run_state_dir(work_root: str | Path, run_id: str) -> Path:
+    return Path(_as_files_abs_path(work_root)) / run_id
+
+
+def _run_state_path(work_root: str | Path, run_id: str) -> Path:
+    return _run_state_dir(work_root, run_id) / GRADE_RUN_STATE_FILENAME
+
+
+def save_run_state(state: dict, *, work_root: str | Path | None = None) -> Path:
+    """Persist hold-mode run state for crash-safe bulk stop."""
+    run_id = state.get("run_id")
+    if not run_id:
+        raise ClickException("run state missing run_id")
+    root = work_root or state.get("staging_root") or DEFAULT_GRADE_WORK_ROOT
+    path = _run_state_path(root, run_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    payload = dict(state)
+    payload["updated_at"] = _utc_now_iso()
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, default=str)
+        fh.write("\n")
+    os.replace(tmp, path)
+    return path
+
+
+def load_run_state(
+    run_id: str,
+    *,
+    work_root: str | Path | None = None,
+    path: str | Path | None = None,
+) -> dict:
+    """Load run_state.json by run_id or explicit path."""
+    if path:
+        state_path = Path(path).expanduser()
+    else:
+        root = work_root or DEFAULT_GRADE_WORK_ROOT
+        state_path = _run_state_path(root, run_id)
+    if not state_path.is_file():
+        raise ClickException(f"Run state not found: {state_path}")
+    with open(state_path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ClickException(f"Invalid run state (not an object): {state_path}")
+    return data
+
+
 def _require_teaching_master(org_slug: str, space_slug: str) -> None:
     """Require the current context to be a teaching-space master instance."""
     try:
@@ -700,6 +814,390 @@ def resolve_students(
         students = students[: max(0, limit)]
     clog.info(f"Resolved {len(students)} student submission(s).")
     return students
+
+
+def resolve_students_from_instances(
+    org_slug: str,
+    space_slug: str,
+    *,
+    instance_filter: str | None = None,
+    limit: int | None = None,
+    include_master: bool = False,
+) -> list[dict]:
+    """Build student list from space instances (no collect/manifest required).
+
+    Excludes the teaching ``master`` instance by default — hold-mode evaluation
+    targets student editor instances only.
+    """
+    clog.info(
+        f"Resolving students from instances for {org_slug}/{space_slug}"
+        + (f" (filter={instance_filter})" if instance_filter else "") + "."
+    )
+    instances = list_instances(org_slug=org_slug, space_slug=space_slug)
+    students: list[dict] = []
+    for idx, inst in enumerate(instances):
+        d = _model_to_dict(inst) if not isinstance(inst, dict) else inst
+        slug = str(d.get("slug") or d.get("short_id") or "")
+        if not slug:
+            continue
+        if not include_master and slug == "master":
+            continue
+        if instance_filter and slug != instance_filter:
+            continue
+        instance_name = d.get("name")
+        email = _email_from_instance_meta(d)
+        folder_name = _safe_student_folder_name(email or instance_name, slug)
+        students.append(
+            {
+                "index": idx,
+                "instance_slug": slug,
+                "src": None,
+                "target": None,
+                "instance_name": instance_name,
+                "email": email,
+                "folder_name": folder_name,
+                "found_in_space": True,
+            }
+        )
+    if instance_filter and not students:
+        raise ClickException(
+            f"No visible instance matched --instance {instance_filter!r}"
+        )
+    if limit is not None:
+        students = students[: max(0, limit)]
+    clog.info(f"Resolved {len(students)} instance(s) for hold-mode.")
+    return students
+
+
+def _count_hold_statuses(students: list[dict]) -> dict:
+    counts = {
+        "total": len(students),
+        "running": 0,
+        "start_failed": 0,
+        "stopped": 0,
+        "stop_failed": 0,
+        "pending": 0,
+        "dry_run": 0,
+        "skipped": 0,
+        "ok": 0,
+        "failed": 0,
+    }
+    for rec in students:
+        status = rec.get("status") or "pending"
+        if status in counts:
+            counts[status] += 1
+        if status == "running":
+            counts["ok"] += 1
+        elif status in ("start_failed", "stop_failed", "failed"):
+            counts["failed"] += 1
+    return counts
+
+
+def start_one_student_hold(
+    *,
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    app_slug: str,
+    command: str | None = None,
+    dry_run: bool = False,
+    skip_app_preflight: bool = False,
+    run_id: str | None = None,
+    results_root: str | Path | None = None,
+    student_folder: str | None = None,
+) -> dict:
+    """Start app and optionally detach a long-running command — do not stop.
+
+    Caller owns bulk stop after the evaluation window (or ``grade stop``).
+    """
+    folder = student_folder or instance_slug
+    record = {
+        "instance_slug": instance_slug,
+        "student_folder": folder,
+        "email": folder if "@" in folder else None,
+        "app_slug": app_slug,
+        "command": command,
+        "status": "pending",
+        "started_at": _utc_now_iso(),
+        "execute": None,
+        "error": None,
+        "stopped": None,
+        "mode": "hold",
+    }
+    clog.info(
+        f"[{instance_slug}] hold start queued for app [{app_slug}] "
+        f"(folder={folder})."
+    )
+    if dry_run:
+        record["status"] = "dry_run"
+        record["finished_at"] = _utc_now_iso()
+        clog.info(
+            f"[dry-run] would start/hold app={app_slug} "
+            f"on {org_slug}/{space_slug}/{instance_slug}"
+            + (f" with detached {command!r}" if command else "")
+        )
+        return record
+
+    if not skip_app_preflight:
+        apps = list_apps(
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=instance_slug,
+            snapshot_slug="development",
+        )
+        app_slugs = set()
+        for a in apps:
+            d = _model_to_dict(a) if not isinstance(a, dict) else a
+            s = d.get("slug") or d.get("short_id")
+            if s:
+                app_slugs.add(s)
+        if app_slug not in app_slugs:
+            record["status"] = "start_failed"
+            record["error"] = (
+                f"App slug '{app_slug}' not found on instance '{instance_slug}'. "
+                f"Available: {sorted(app_slugs)}"
+            )
+            record["finished_at"] = _utc_now_iso()
+            clog.error(f"[{instance_slug}] app preflight failed: {record['error']}")
+            return record
+
+    try:
+        click.echo(
+            f"\n>>> [{instance_slug}] ({folder}) starting app [{app_slug}] for hold…"
+        )
+        start_app(
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=instance_slug,
+            app_slug=app_slug,
+            node_pool=None,
+        )
+        click.echo(f">>> [{instance_slug}] waiting until app is RUNNING…")
+        wait_for_app_running(
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=instance_slug,
+            app_slug=app_slug,
+        )
+        clog.info(f"[{instance_slug}] app is RUNNING (hold).")
+        click.echo(f">>> [{instance_slug}] app is RUNNING.")
+
+        if command:
+            if not run_id or results_root is None:
+                raise ClickException(
+                    f"[{instance_slug}] internal error: run_id and results_root "
+                    f"required for detached command."
+                )
+            output_log = _cmd_output_path(results_root, run_id, folder)
+            pid_file = f"{_cmd_work_dir(results_root, run_id, folder)}/server.pid"
+            wrapped = _wrap_command_detached(
+                command, output_log=output_log, pid_file=pid_file
+            )
+            clog.info(
+                f"[{instance_slug}] launching detached command: {command!r}"
+            )
+            click.echo(
+                f">>> [{instance_slug}] detached exec (no wait): {command!r}"
+            )
+            exec_result = execute_command_in_app(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                app_slug=app_slug,
+                command=wrapped,
+            )
+            record["execute"] = _serialize_execute_result(exec_result)
+            record["execute"]["output_path"] = output_log
+            record["execute"]["pid_file"] = pid_file
+            record["execute"]["detached"] = True
+            record["execute"]["submitted_command"] = command
+
+        record["status"] = "running"
+        record["running_at"] = _utc_now_iso()
+    except Exception as exc:
+        record["status"] = "start_failed"
+        record["error"] = str(exc)
+        record["finished_at"] = _utc_now_iso()
+        clog.error(f"[{instance_slug}] hold start failed: {exc}")
+    return record
+
+
+def bulk_stop_students(
+    *,
+    org_slug: str,
+    space_slug: str,
+    app_slug: str,
+    students: list[dict],
+    dry_run: bool = False,
+    parallel: int = 1,
+    stagger_secs: float = 0.0,
+    only_statuses: tuple[str, ...] = ("running", "stop_failed"),
+) -> list[dict]:
+    """Best-effort stop for students in the given statuses; mutates records."""
+    stop_list: list[dict] = []
+    seen = set()
+    for rec in students:
+        key = id(rec)
+        if key in seen:
+            continue
+        status = rec.get("status")
+        err = str(rec.get("error") or "")
+        should = status in only_statuses
+        # Partial start failure after start_app: still attempt stop.
+        if status == "start_failed" and "not found on instance" not in err:
+            should = True
+        if rec.get("stopped") is False:
+            should = True
+        if should:
+            seen.add(key)
+            stop_list.append(rec)
+
+
+    def _stop_one(rec: dict) -> dict:
+        slug = rec.get("instance_slug")
+        if dry_run:
+            rec["status"] = "dry_run"
+            rec["stopped"] = None
+            clog.info(f"[dry-run] would stop app={app_slug} on {slug}")
+            return rec
+        try:
+            click.echo(f">>> [{slug}] stopping app [{app_slug}]…")
+            stop_app(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=slug,
+                app_slug=app_slug,
+            )
+            rec["stopped"] = True
+            rec["status"] = "stopped"
+            rec["stopped_at"] = _utc_now_iso()
+            rec.pop("stop_error", None)
+            clog.info(f"[{slug}] stopped.")
+        except Exception as stop_exc:
+            rec["stopped"] = False
+            rec["status"] = "stop_failed"
+            rec["stop_error"] = str(stop_exc)
+            clog.error(f"[{slug}] stop failed: {stop_exc}")
+        return rec
+
+    if not stop_list:
+        clog.info("No running students to stop.")
+        return students
+
+    worker_count = max(1, int(parallel or 1))
+    clog.info(
+        f"Bulk-stopping {len(stop_list)} app(s) with parallel={worker_count}, "
+        f"stagger_secs={stagger_secs}."
+    )
+    if worker_count == 1:
+        for rec in stop_list:
+            _stop_one(rec)
+            if stagger_secs and stagger_secs > 0:
+                time.sleep(stagger_secs)
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {}
+            pending = list(stop_list)
+            while pending or futures:
+                while pending and len(futures) < worker_count:
+                    rec = pending.pop(0)
+                    futures[executor.submit(_stop_one, rec)] = rec
+                    if stagger_secs and stagger_secs > 0:
+                        time.sleep(stagger_secs)
+                if not futures:
+                    break
+                done, _ = wait(futures.keys(), return_when=FIRST_COMPLETED)
+                for fut in done:
+                    futures.pop(fut, None)
+                    fut.result()
+    return students
+
+
+def hold_evaluation_window(
+    *,
+    duration_seconds: int,
+    state: dict,
+    work_root: str | Path,
+    stop_event: threading.Event | None = None,
+    heartbeat_secs: int = 30,
+) -> str:
+    """Block until duration elapses or stop_event is set. Returns reason."""
+    stop_event = stop_event or threading.Event()
+    if duration_seconds <= 0:
+        return "no_hold"
+    ends_at = time.monotonic() + duration_seconds
+    state["hold_started_at"] = _utc_now_iso()
+    state["hold_ends_at_unix_hint"] = time.time() + duration_seconds
+    state_path = save_run_state(state, work_root=work_root)
+    click.echo(
+        f"\n>>> Holding evaluation window for {duration_seconds}s "
+        f"(run_id={state.get('run_id')}). "
+        f"Ctrl-C triggers bulk stop. State: {state_path}"
+    )
+    clog.info(
+        f"Hold window started: duration={duration_seconds}s run_id={state.get('run_id')}"
+    )
+    reason = "duration_elapsed"
+    while True:
+        if stop_event.is_set():
+            reason = "signal"
+            break
+        remaining = ends_at - time.monotonic()
+        if remaining <= 0:
+            break
+        sleep_for = min(float(heartbeat_secs), remaining)
+        # Wait that is interruptible via stop_event.
+        if stop_event.wait(timeout=sleep_for):
+            reason = "signal"
+            break
+        state["hold_heartbeat_at"] = _utc_now_iso()
+        state["hold_remaining_secs"] = max(0, int(ends_at - time.monotonic()))
+        try:
+            save_run_state(state, work_root=work_root)
+        except Exception as exc:
+            clog.warning(f"Failed to write hold heartbeat state: {exc}")
+    state["hold_finished_at"] = _utc_now_iso()
+    state["hold_end_reason"] = reason
+    save_run_state(state, work_root=work_root)
+    clog.info(f"Hold window ended: reason={reason}")
+    click.echo(f">>> Hold ended ({reason}).")
+    return reason
+
+
+def _run_bounded_pool(
+    items: list,
+    *,
+    worker_count: int,
+    stagger_secs: float,
+    process_fn,
+) -> list:
+    """Process items with at most worker_count in-flight starts + optional stagger."""
+    worker_count = max(1, int(worker_count or 1))
+    results: list = []
+    if worker_count == 1:
+        for item in items:
+            results.append(process_fn(item))
+            if stagger_secs and stagger_secs > 0:
+                time.sleep(stagger_secs)
+        return results
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {}
+        pending = list(items)
+        while pending or futures:
+            while pending and len(futures) < worker_count:
+                item = pending.pop(0)
+                futures[executor.submit(process_fn, item)] = item
+                if stagger_secs and stagger_secs > 0:
+                    time.sleep(stagger_secs)
+            if not futures:
+                break
+            done, _ = wait(futures.keys(), return_when=FIRST_COMPLETED)
+            for fut in done:
+                futures.pop(fut, None)
+                results.append(fut.result())
+    return results
+
 
 
 
@@ -1448,7 +1946,7 @@ def run_grade_check(
     org_slug: str,
     space_slug: str,
     app_slug: str,
-    command: str,
+    command: str | None = None,
     results_dir: str | None = None,
     target_folder: str | None = None,
     assignment_name: str | None = None,
@@ -1463,22 +1961,29 @@ def run_grade_check(
     parallel: int = 1,
     pull_logs: bool = True,
     instructor_instance_slug: str | None = None,
+    hold_duration_seconds: int | None = None,
+    keep_running: bool = False,
+    stagger_secs: float = 0.0,
+    from_instances: bool = False,
 ) -> dict:
-    """Orchestrator: collect → test → publish into handin/handback structure.
+    """Orchestrator for validation check or concurrent hold evaluation.
 
-    Durable instructor + student artifacts live under the existing assignment
-    review trees (students see **handback**, read-only)::
+    **Validation mode** (default): collect → start → execute → pull logs → stop
+    → publish handin/handback.
 
-        /files/assignments-review/handin/<instance>/<assignment>/<ts>_…/
-            output.log
-            grade_meta.json
-        /files/assignments-review/handback/<instance>/<assignment>/<ts>_…/
-            output.log
-            grade_meta.json   # same content, student-visible readonly
-
-    ``results_dir`` is only an optional staging override (default
-    ``/files/.nuvolos_grade``) for execute/distribute scratch space.
+    **Hold mode** (``hold_duration_seconds is not None`` or ``keep_running``):
+    resolve students → wave-start apps (optional detached command) → hold
+    window → bulk stop. Persists ``run_state.json`` so ``grade stop`` can
+    recover after a CLI crash. Does not publish handin/handback.
     """
+    hold_mode = hold_duration_seconds is not None or keep_running
+    if hold_mode and hold_duration_seconds is None:
+        hold_duration_seconds = 0
+    if hold_mode:
+        # Partial cohort is the useful outcome for an evaluation window.
+        continue_on_error = True
+        pull_logs = False
+
     instructor_instance_slug = instructor_instance_slug or _instructor_instance_slug()
 
     # Scratch tree for collect + in-app execute/distribute (not the durable store).
@@ -1491,107 +1996,182 @@ def run_grade_check(
     run_results_abs = _as_files_abs_path(run_results_dir)
 
     collect_dest = run_results_abs
-    if target_folder and not skip_collect:
+    if target_folder and not skip_collect and not from_instances:
         clog.warning(
             "--target-folder is deprecated for grade check; using internal staging "
             f"under {run_results_abs}. Final artifacts go to handin/handback."
         )
 
+    mode_label = "hold" if hold_mode else "check"
     clog.info(
-        f"Starting grade run for {org_slug}/{space_slug}: app={app_slug}, "
-        f"parallel={max(1, parallel)}, dry_run={dry_run}, pull_logs={pull_logs}, "
+        f"Starting grade {mode_label} for {org_slug}/{space_slug}: app={app_slug}, "
+        f"parallel={max(1, parallel)}, stagger_secs={stagger_secs}, "
+        f"dry_run={dry_run}, pull_logs={pull_logs}, "
         f"instructor_instance={instructor_instance_slug}, "
-        f"staging={run_results_abs}, durable=handin+handback."
-    )
-
-
-    if not skip_collect:
-        if not assignment_name or not assignment_folder:
-            raise ClickException(
-                "Collect requires --assignment-name and --assignment-folder "
-                "(or pass --skip-collect with --manifest / prior results run dir)."
-            )
-        if not dry_run:
-            collect_submissions(
-                assignment_name,
-                assignment_folder,
-                collect_dest,
-                org_slug=org_slug,
-                space_slug=space_slug,
-            )
-        else:
-            clog.info(
-                f"[dry-run] would collect assignment_name={assignment_name!r} "
-                f"assignment_folder={assignment_folder!r} into {collect_dest} "
-                f"(student-email folders + later output.log in the same dirs)"
-            )
-        manifest_source = collect_dest
-    else:
-        manifest_source = manifest_path or target_folder
-        if not manifest_source:
-            raise ClickException(
-                "--skip-collect requires --manifest or --target-folder "
-                "pointing at an existing collect / prior results run directory."
-            )
-        # Existing collect trees may still use instance_slug folder names.
-        relabel_root = target_folder or (
-            str(Path(manifest_source).parent)
-            if Path(manifest_source).is_file()
-            else manifest_source
+        f"staging={run_results_abs}"
+        + (
+            f", hold_duration={hold_duration_seconds}s, keep_running={keep_running}."
+            if hold_mode
+            else ", durable=handin+handback."
         )
-        if not dry_run and relabel_root and Path(relabel_root).is_dir():
-            relabel_collect_targets_by_email(relabel_root, org_slug, space_slug)
-
-    if skip_collect or not dry_run:
-        manifest = read_manifest(manifest_source)
-    else:
-        try:
-            manifest = read_manifest(manifest_source)
-        except ClickException:
-            clog.warning("No existing manifest for dry-run; student list is empty.")
-            manifest = {"meta": {}, "items": []}
-
-    students = resolve_students(
-        manifest,
-        org_slug,
-        space_slug,
-        instance_filter=instance_filter,
-        limit=limit,
     )
-    clog.info(f"Prepared {len(students)} student(s) for grading.")
+
+    manifest_source: str | None = None
+    if from_instances:
+        skip_collect = True
+        students = resolve_students_from_instances(
+            org_slug,
+            space_slug,
+            instance_filter=instance_filter,
+            limit=limit,
+        )
+    else:
+        if not skip_collect:
+            if not assignment_name or not assignment_folder:
+                raise ClickException(
+                    "Collect requires --assignment-name and --assignment-folder "
+                    "(or pass --skip-collect with --manifest, or --from-instances)."
+                )
+            if not dry_run:
+                collect_submissions(
+                    assignment_name,
+                    assignment_folder,
+                    collect_dest,
+                    org_slug=org_slug,
+                    space_slug=space_slug,
+                )
+            else:
+                clog.info(
+                    f"[dry-run] would collect assignment_name={assignment_name!r} "
+                    f"assignment_folder={assignment_folder!r} into {collect_dest} "
+                    f"(student-email folders + later output.log in the same dirs)"
+                )
+            manifest_source = collect_dest
+        else:
+            manifest_source = manifest_path or target_folder
+            if not manifest_source:
+                raise ClickException(
+                    "--skip-collect requires --manifest or --target-folder "
+                    "pointing at an existing collect / prior results run directory "
+                    "(or pass --from-instances)."
+                )
+            # Existing collect trees may still use instance_slug folder names.
+            relabel_root = target_folder or (
+                str(Path(manifest_source).parent)
+                if Path(manifest_source).is_file()
+                else manifest_source
+            )
+            if not dry_run and relabel_root and Path(relabel_root).is_dir():
+                relabel_collect_targets_by_email(relabel_root, org_slug, space_slug)
+
+        if skip_collect or not dry_run:
+            manifest = read_manifest(manifest_source)
+        else:
+            try:
+                manifest = read_manifest(manifest_source)
+            except ClickException:
+                clog.warning("No existing manifest for dry-run; student list is empty.")
+                manifest = {"meta": {}, "items": []}
+
+        students = resolve_students(
+            manifest,
+            org_slug,
+            space_slug,
+            instance_filter=instance_filter,
+            limit=limit,
+        )
+
+    clog.info(f"Prepared {len(students)} student(s) for grade {mode_label}.")
 
     summary = {
         "run_id": run_id,
+        "mode": mode_label,
         "started_at": _utc_now_iso(),
         "org_slug": org_slug,
         "space_slug": space_slug,
         "app_slug": app_slug,
         "command_template": command,
-        "target_folder": collect_dest if not skip_collect else (
-            target_folder or manifest_source
+        "target_folder": (
+            None
+            if from_instances
+            else (collect_dest if not skip_collect else (target_folder or manifest_source))
         ),
         "assignment_name": assignment_name,
         "assignment_folder": assignment_folder,
         "skip_collect": skip_collect,
+        "from_instances": from_instances,
         "instance_filter": instance_filter,
         "dry_run": dry_run,
         "parallel": parallel,
+        "stagger_secs": stagger_secs,
         "pull_logs": pull_logs,
+        "hold_duration_seconds": hold_duration_seconds if hold_mode else None,
+        "keep_running": keep_running if hold_mode else False,
         "instructor_instance_slug": instructor_instance_slug,
         "staging_root": work_root,
         "staging_run_dir": run_results_abs,
-        "durable_store": f"{HANDIN_REVIEW_ROOT} + {HANDBACK_REVIEW_ROOT}",
-
-
+        "durable_store": (
+            None
+            if hold_mode
+            else f"{HANDIN_REVIEW_ROOT} + {HANDBACK_REVIEW_ROOT}"
+        ),
         "counts": {
             "total": len(students),
             "ok": 0,
             "failed": 0,
             "skipped": 0,
             "dry_run": 0,
+            "running": 0,
+            "stopped": 0,
+            "start_failed": 0,
+            "stop_failed": 0,
+            "pending": 0,
         },
         "students": [],
     }
+
+    runnable = []
+    for student in students:
+        if student["found_in_space"]:
+            runnable.append(student)
+            continue
+        slug = student["instance_slug"]
+        msg = (
+            f"Instance '{slug}' not found in org={org_slug} space={space_slug} "
+            f"(or API key lacks access)."
+        )
+        if not (skip_missing_instances or continue_on_error):
+            raise ClickException(msg)
+        clog.warning(msg + " Skipping.")
+        summary["students"].append(
+            {
+                **student,
+                "status": "skipped",
+                "error": msg,
+                "finished_at": _utc_now_iso(),
+            }
+        )
+        summary["counts"]["skipped"] += 1
+
+    if hold_mode:
+        return _run_hold_check(
+            summary=summary,
+            runnable=runnable,
+            org_slug=org_slug,
+            space_slug=space_slug,
+            app_slug=app_slug,
+            command=command,
+            dry_run=dry_run,
+            parallel=parallel,
+            stagger_secs=stagger_secs,
+            hold_duration_seconds=int(hold_duration_seconds or 0),
+            keep_running=keep_running,
+            work_root=work_root,
+            run_id=run_id,
+        )
+
+    if not command:
+        raise ClickException("--command is required for validation grade check")
 
     def process(student):
         slug = student["instance_slug"]
@@ -1609,7 +2189,6 @@ def run_grade_check(
             dry_run=dry_run,
             run_id=run_id,
             results_root=work_root,
-
             student_folder=folder,
             instructor_instance_slug=instructor_instance_slug,
             pull_logs=pull_logs,
@@ -1624,21 +2203,6 @@ def run_grade_check(
             }
         )
         return rec
-
-
-    runnable = []
-    for student in students:
-        if student["found_in_space"]:
-            runnable.append(student)
-            continue
-        slug = student["instance_slug"]
-        msg = f"Instance '{slug}' not found in org={org_slug} space={space_slug} (or API key lacks access)."
-        if not (skip_missing_instances or continue_on_error):
-            raise ClickException(msg)
-        clog.warning(msg + " Skipping.")
-        summary["students"].append({**student, "status": "skipped", "error": msg,
-                                     "finished_at": _utc_now_iso()})
-        summary["counts"]["skipped"] += 1
 
     worker_count = max(1, parallel)
     if not continue_on_error and not dry_run and worker_count > 1:
@@ -1680,9 +2244,13 @@ def run_grade_check(
                     )
                 break
     else:
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [executor.submit(process, student) for student in runnable]
-            records = [future.result() for future in futures]
+        # Bounded in-flight starts (not all futures at once when stagger set).
+        records = _run_bounded_pool(
+            runnable,
+            worker_count=worker_count,
+            stagger_secs=stagger_secs,
+            process_fn=process,
+        )
 
     for rec in records:
         summary["students"].append(rec)
@@ -1700,9 +2268,8 @@ def run_grade_check(
             f"(ok={summary['counts']['ok']}, failed={summary['counts']['failed']}, "
             f"skipped={summary['counts']['skipped']})."
         )
-        if not dry_run and worker_count == 1:
+        if not dry_run and worker_count == 1 and stagger_secs <= 0:
             time.sleep(1)
-
 
     summary["finished_at"] = _utc_now_iso()
 
@@ -1754,6 +2321,248 @@ def run_grade_check(
         f"(students see handback, read-only)."
     )
     return summary
+
+
+def _run_hold_check(
+    *,
+    summary: dict,
+    runnable: list[dict],
+    org_slug: str,
+    space_slug: str,
+    app_slug: str,
+    command: str | None,
+    dry_run: bool,
+    parallel: int,
+    stagger_secs: float,
+    hold_duration_seconds: int,
+    keep_running: bool,
+    work_root: str,
+    run_id: str,
+) -> dict:
+    """Wave-start → optional hold → bulk stop. Mutates and returns summary."""
+    worker_count = max(1, int(parallel or 1))
+    state_path = _run_state_path(work_root, run_id)
+
+    def process(student):
+        slug = student["instance_slug"]
+        folder = student.get("folder_name") or slug
+        cmd = None
+        if command:
+            cmd = expand_command_template(
+                command,
+                instance_slug=slug,
+                target=str(student.get("target") or ""),
+            )
+        rec = start_one_student_hold(
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=slug,
+            app_slug=app_slug,
+            command=cmd,
+            dry_run=dry_run,
+            run_id=run_id,
+            results_root=work_root,
+            student_folder=folder,
+        )
+        rec.update(
+            {
+                "src": student.get("src"),
+                "target": student.get("target"),
+                "instance_name": student.get("instance_name"),
+                "email": student.get("email"),
+                "folder_name": folder,
+            }
+        )
+        return rec
+
+    clog.info(
+        f"Hold-mode starting {len(runnable)} student app(s): parallel={worker_count}, "
+        f"stagger_secs={stagger_secs}."
+    )
+    # Seed durable state before starts so crash mid-ramp still has a roster.
+    summary["students"] = [
+        {
+            **s,
+            "status": "pending",
+            "app_slug": app_slug,
+        }
+        for s in summary.get("students") or []
+    ]
+    # pending placeholders for runnable too (replaced after start).
+    pending_by_slug = {
+        s["instance_slug"]: {
+            **s,
+            "status": "pending",
+            "app_slug": app_slug,
+        }
+        for s in runnable
+    }
+    summary["students"] = list(summary["students"]) + list(pending_by_slug.values())
+    save_run_state(summary, work_root=work_root)
+    click.echo(f">>> Hold run_id={run_id} state → {state_path}")
+
+    records = _run_bounded_pool(
+        runnable,
+        worker_count=worker_count,
+        stagger_secs=stagger_secs,
+        process_fn=process,
+    )
+
+    # Rebuild students list: keep prior skipped, replace pending with results.
+    kept = [r for r in summary["students"] if r.get("status") == "skipped"]
+    summary["students"] = kept + records
+    summary["counts"] = _count_hold_statuses(summary["students"])
+    summary["phase"] = "started"
+    save_run_state(summary, work_root=work_root)
+
+    running_n = summary["counts"].get("running", 0)
+    failed_n = summary["counts"].get("start_failed", 0) + summary["counts"].get(
+        "failed", 0
+    )
+    click.echo(
+        f"\n>>> Start ramp done: running={running_n} start_failed={failed_n} "
+        f"dry_run={summary['counts'].get('dry_run', 0)}"
+    )
+
+    stop_event = threading.Event()
+    previous_handlers = {}
+
+    def _on_signal(signum, _frame):
+        clog.warning(f"Received signal {signum}; requesting bulk stop.")
+        click.echo(f"\n!!! Signal {signum} — bulk-stopping hold run {run_id}…")
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous_handlers[sig] = signal.getsignal(sig)
+            signal.signal(sig, _on_signal)
+        except (ValueError, OSError) as exc:
+            # Not on main thread / unsupported — hold still works without signals.
+            clog.debug(f"Could not install handler for {sig}: {exc}")
+
+    try:
+        if keep_running:
+            summary["phase"] = "keep_running"
+            summary["hold_end_reason"] = "keep_running"
+            save_run_state(summary, work_root=work_root)
+            click.echo(
+                f"\n=== Hold start complete (apps left running) run_id={run_id} ===\n"
+                f"  running={running_n}  start_failed={failed_n}\n"
+                f"  Stop later with: nuvolos grade stop --run-id {run_id}\n"
+                f"  State: {state_path}"
+            )
+            summary["finished_at"] = _utc_now_iso()
+            save_run_state(summary, work_root=work_root)
+            return summary
+
+        if not dry_run and hold_duration_seconds > 0 and running_n > 0:
+            summary["phase"] = "holding"
+            save_run_state(summary, work_root=work_root)
+            hold_evaluation_window(
+                duration_seconds=hold_duration_seconds,
+                state=summary,
+                work_root=work_root,
+                stop_event=stop_event,
+            )
+        elif dry_run:
+            summary["hold_end_reason"] = "dry_run"
+        else:
+            summary["hold_end_reason"] = (
+                "no_running_apps" if running_n == 0 else "no_hold"
+            )
+
+        summary["phase"] = "stopping"
+        save_run_state(summary, work_root=work_root)
+        if not dry_run:
+            bulk_stop_students(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                app_slug=app_slug,
+                students=summary["students"],
+                dry_run=dry_run,
+                parallel=worker_count,
+                stagger_secs=stagger_secs,
+            )
+        summary["counts"] = _count_hold_statuses(summary["students"])
+        summary["phase"] = "finished"
+        summary["finished_at"] = _utc_now_iso()
+        state_path = save_run_state(summary, work_root=work_root)
+    finally:
+        for sig, handler in previous_handlers.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):
+                pass
+
+    clog.info(
+        f"Hold run complete: running={summary['counts'].get('running')}, "
+        f"stopped={summary['counts'].get('stopped')}, "
+        f"start_failed={summary['counts'].get('start_failed')}, "
+        f"stop_failed={summary['counts'].get('stop_failed')}."
+    )
+    click.echo(
+        f"\n=== Grade hold run {run_id} complete ===\n"
+        f"  running={summary['counts'].get('running')}  "
+        f"stopped={summary['counts'].get('stopped')}  "
+        f"start_failed={summary['counts'].get('start_failed')}  "
+        f"stop_failed={summary['counts'].get('stop_failed')}\n"
+        f"  State: {state_path}"
+    )
+    return summary
+
+
+def stop_hold_run(
+    *,
+    run_id: str | None = None,
+    state_path: str | Path | None = None,
+    work_root: str | None = None,
+    parallel: int = 5,
+    stagger_secs: float = 0.0,
+    dry_run: bool = False,
+) -> dict:
+    """Load persisted hold run state and bulk-stop remaining apps."""
+    root = work_root or DEFAULT_GRADE_WORK_ROOT
+    if state_path:
+        state = load_run_state(run_id or "unknown", path=state_path)
+    else:
+        if not run_id:
+            raise ClickException("--run-id is required unless --state-file is set")
+        state = load_run_state(run_id, work_root=root)
+    org_slug = state.get("org_slug")
+    space_slug = state.get("space_slug")
+    app_slug = state.get("app_slug")
+    if not org_slug or not space_slug or not app_slug:
+        raise ClickException(
+            "Run state missing org_slug/space_slug/app_slug; cannot stop"
+        )
+    _validate_grade_environment(org_slug, space_slug)
+    students = list(state.get("students") or [])
+    if not students:
+        raise ClickException("Run state has no students to stop")
+    click.echo(
+        f">>> Stopping hold run_id={state.get('run_id')} "
+        f"({len(students)} student record(s)) app={app_slug}"
+    )
+    bulk_stop_students(
+        org_slug=org_slug,
+        space_slug=space_slug,
+        app_slug=app_slug,
+        students=students,
+        dry_run=dry_run,
+        parallel=parallel,
+        stagger_secs=stagger_secs,
+    )
+    state["students"] = students
+    state["counts"] = _count_hold_statuses(students)
+    state["phase"] = "stopped_external"
+    state["finished_at"] = _utc_now_iso()
+    out = save_run_state(state, work_root=state.get("staging_root") or root)
+    click.echo(
+        f"=== Stop complete === stopped={state['counts'].get('stopped')} "
+        f"stop_failed={state['counts'].get('stop_failed')} state={out}"
+    )
+    return state
+
 
 
 
@@ -1912,8 +2721,9 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     default=None,
     required=False,
     help=(
-        "Shell command to run inside each student app (cwd=/files). "
-        "Example: 'python assignments/main.py'. "
+        "Shell command inside each student app (cwd=/files). "
+        "Validation mode: required; waits for exit. "
+        "Hold mode (--hold-duration/--keep-running): optional; launched detached. "
         "Placeholders: {instance_slug}, {instance}, {target}."
     ),
 )
@@ -1974,7 +2784,7 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     type=click.IntRange(min=1),
     default=1,
     show_default=True,
-    help="Run up to N student checks concurrently.",
+    help="Max concurrent student starts/checks (wave size in hold mode).",
 )
 @click.option(
     "--all",
@@ -1995,6 +2805,38 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     "--instructor-instance",
     default=None,
     help="Instructor instance slug to receive logs (default: NV_CONTEXT instance or 'master').",
+)
+@click.option(
+    "--hold-duration",
+    default=None,
+    help=(
+        "Hold mode: keep apps RUNNING for this duration then bulk-stop. "
+        "Examples: 30m, 1h, 1800. Enables concurrent evaluation window "
+        "(no per-student stop-after-command)."
+    ),
+)
+@click.option(
+    "--keep-running",
+    is_flag=True,
+    help=(
+        "Hold mode without timed stop: start apps and exit, leaving them running. "
+        "Stop later with `nuvolos grade stop --run-id ...`."
+    ),
+)
+@click.option(
+    "--stagger-secs",
+    type=float,
+    default=0.0,
+    show_default=True,
+    help="Sleep between start requests inside a wave (rate-limit friendly).",
+)
+@click.option(
+    "--from-instances",
+    is_flag=True,
+    help=(
+        "Resolve students from space instance list (exclude master) instead of "
+        "collect/manifest. Typical for hold-mode evaluation rosters."
+    ),
 )
 def nv_grade_check(
     assignment_name,
@@ -2017,16 +2859,39 @@ def nv_grade_check(
     grade_all,
     pull_logs,
     instructor_instance,
+    hold_duration,
+    keep_running,
+    stagger_secs,
+    from_instances,
 ):
-    """Collect, run --command, publish results into handin/handback (no --results-dir needed)."""
+    """Validate submissions, or hold student apps for concurrent external evaluation.
+
+    Default (validation): collect → start → run --command → pull logs → stop →
+    publish handin/handback.
+
+    Hold mode (--hold-duration / --keep-running): wave-start apps, optional
+    detached --command, hold window, bulk stop. State under
+    /files/.nuvolos_grade/<run_id>/run_state.json for `grade stop` recovery.
+    """
     _validate_grade_environment(org, space)
     if grade_all:
         limit = None
     run_command = command or legacy_test_command
-    if not run_command:
-        raise ClickException("--command is required (or deprecated --test-command)")
+    hold_secs = _parse_duration_seconds(hold_duration) if hold_duration is not None else None
+    hold_mode = hold_secs is not None or keep_running
 
-    if not skip_collect:
+    if hold_mode and hold_secs is not None and hold_secs < 0:
+        raise ClickException("--hold-duration must be >= 0")
+
+    if not hold_mode and not run_command:
+        raise ClickException(
+            "--command is required for validation mode "
+            "(or pass --hold-duration / --keep-running)"
+        )
+
+    if from_instances:
+        skip_collect = True
+    elif not skip_collect:
         missing = [
             name
             for name, val in (
@@ -2039,7 +2904,7 @@ def nv_grade_check(
             raise ClickException(
                 "Collect requires: "
                 + ", ".join(missing)
-                + " (or pass --skip-collect with --manifest)"
+                + " (or pass --skip-collect with --manifest, or --from-instances)"
             )
 
     summary = run_grade_check(
@@ -2061,30 +2926,52 @@ def nv_grade_check(
         skip_missing_instances=skip_missing_instances,
         pull_logs=pull_logs,
         instructor_instance_slug=instructor_instance,
+        hold_duration_seconds=hold_secs if hold_mode else None,
+        keep_running=keep_running,
+        stagger_secs=stagger_secs,
+        from_instances=from_instances,
     )
 
-    # Instructor-facing detailed report (no separate grade_run_*.json file).
+    mode = summary.get("mode") or "check"
     click.echo("\n" + "=" * 72)
-    click.echo(f"GRADE CHECK SUMMARY  run_id={summary.get('run_id')}")
+    if mode == "hold":
+        click.echo(f"GRADE HOLD SUMMARY  run_id={summary.get('run_id')}")
+    else:
+        click.echo(f"GRADE CHECK SUMMARY  run_id={summary.get('run_id')}")
     click.echo("=" * 72)
     click.echo(json.dumps(summary.get("counts") or {}, indent=2))
+    if mode == "hold":
+        click.echo(
+            f"phase={summary.get('phase')!r} "
+            f"hold_end_reason={summary.get('hold_end_reason')!r}"
+        )
+        state_hint = _run_state_path(
+            summary.get("staging_root") or DEFAULT_GRADE_WORK_ROOT,
+            summary.get("run_id") or "",
+        )
+        click.echo(f"state={state_hint}")
     click.echo("-" * 72)
     for rec in summary.get("students") or []:
         slug = rec.get("instance_slug") or "?"
         email = rec.get("email") or rec.get("folder_name") or ""
         status = rec.get("status")
         exit_code = (rec.get("execute") or {}).get("exit_code")
-        err = rec.get("error") or ""
+        err = rec.get("error") or rec.get("stop_error") or ""
         pub = rec.get("handin_publish") or {}
         click.echo(f"\n• {email or slug}")
         click.echo(f"    instance : {slug}")
-        click.echo(f"    status   : {status}" + (f"  exit_code={exit_code}" if exit_code is not None else ""))
+        click.echo(
+            f"    status   : {status}"
+            + (f"  exit_code={exit_code}" if exit_code is not None else "")
+        )
         if err:
             click.echo(f"    error    : {err}")
         if pub.get("handin_dir"):
             click.echo(f"    handin   : {pub.get('handin_dir')}")
         if pub.get("handback_dir"):
-            click.echo(f"    handback : {pub.get('handback_dir')}  (student-visible, read-only)")
+            click.echo(
+                f"    handback : {pub.get('handback_dir')}  (student-visible, read-only)"
+            )
         for fpath in pub.get("files") or []:
             click.echo(f"    file     : {fpath}")
         logs = rec.get("instructor_logs") or {}
@@ -2102,12 +2989,76 @@ def nv_grade_check(
             click.echo("-" * len(ban))
     hb = summary.get("handback") or {}
     if hb:
-        click.echo(f"\nhandback batch: status={hb.get('status')!r} error={hb.get('error')!r}")
+        click.echo(
+            f"\nhandback batch: status={hb.get('status')!r} error={hb.get('error')!r}"
+        )
     click.echo("=" * 72 + "\n")
 
-    if summary["counts"]["failed"] and not dry_run:
-        raise ClickException(
-            f"Grade run finished with {summary['counts']['failed']} failure(s). "
-            f"See per-student handin/handback output.log above."
+    failed = int(summary.get("counts", {}).get("failed") or 0)
+    if mode == "hold":
+        failed = int(summary.get("counts", {}).get("start_failed") or 0) + int(
+            summary.get("counts", {}).get("stop_failed") or 0
         )
+    if failed and not dry_run:
+        raise ClickException(
+            f"Grade run finished with {failed} failure(s). "
+            + (
+                f"Use `nuvolos grade stop --run-id {summary.get('run_id')}` if apps remain up."
+                if mode == "hold"
+                else "See per-student handin/handback output.log above."
+            )
+        )
+
+
+@nv_grade.command("stop")
+@click.option(
+    "--run-id",
+    default=None,
+    help="Hold-mode run_id from a prior `grade check --hold-duration` / --keep-running.",
+)
+@click.option(
+    "--state-file",
+    type=click.Path(exists=True),
+    default=None,
+    help="Explicit path to run_state.json (alternative to --run-id).",
+)
+@click.option(
+    "--results-dir",
+    "-r",
+    default=None,
+    type=click.Path(),
+    help=f"Staging root that contains <run_id>/ (default {DEFAULT_GRADE_WORK_ROOT}).",
+)
+@click.option(
+    "--parallel",
+    type=click.IntRange(min=1),
+    default=5,
+    show_default=True,
+    help="Max concurrent stop requests.",
+)
+@click.option(
+    "--stagger-secs",
+    type=float,
+    default=0.0,
+    show_default=True,
+    help="Sleep between stop requests.",
+)
+@click.option("--dry-run", is_flag=True, help="Plan only; do not stop apps.")
+def nv_grade_stop(run_id, state_file, results_dir, parallel, stagger_secs, dry_run):
+    """Bulk-stop apps from a prior hold-mode grade check (crash recovery)."""
+    if not run_id and not state_file:
+        raise ClickException("Provide --run-id or --state-file")
+    state = stop_hold_run(
+        run_id=run_id,
+        state_path=state_file,
+        work_root=results_dir,
+        parallel=parallel,
+        stagger_secs=stagger_secs,
+        dry_run=dry_run,
+    )
+    click.echo(json.dumps(state.get("counts") or {}, indent=2))
+    failed = int((state.get("counts") or {}).get("stop_failed") or 0)
+    if failed and not dry_run:
+        raise ClickException(f"Bulk stop finished with {failed} stop_failed student(s).")
+
 

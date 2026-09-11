@@ -24,6 +24,7 @@ from .api_client import (
     wait_for_task,
     get_task,
     create_instance,
+    create_group_instance,
     create_app,
     derive_app,
     list_images,
@@ -710,6 +711,17 @@ def nv_info(ctx):
     help="The description of the instance to create",
 )
 @click.option(
+    "--group",
+    is_flag=True,
+    help="Create a group instance and invite editors asynchronously.",
+)
+@click.option(
+    "--editor-email",
+    type=str,
+    multiple=True,
+    help="Email address to invite as a group instance editor. Repeat for multiple editors. Requires --group.",
+)
+@click.option(
     "-f",
     "--format",
     type=str,
@@ -720,21 +732,30 @@ def nv_info(ctx):
 @format_response
 def nv_instances_create(ctx, **kwargs):
     """
-    Creates a new instance in the specified space.
+    Creates an individual instance, or a group instance when --group is supplied.
     """
+    editor_emails = list(kwargs["editor_email"])
+    if kwargs["group"] and not editor_emails:
+        raise click.UsageError("--group requires at least one --editor-email")
+    if editor_emails and not kwargs["group"]:
+        raise click.UsageError("--editor-email requires --group")
+
     check_api_key_configured()
     instance_ctx = get_effective_instance_context(ctx, **kwargs)
     from slugify import slugify
 
     slug = kwargs.get("slug") or slugify(kwargs["name"], separator="_")
-    res = create_instance(
-        org_slug=instance_ctx.get("org_slug"),
-        space_slug=instance_ctx.get("space_slug"),
-        instance_name=kwargs["name"],
-        instance_slug=slug,
-        instance_description=kwargs.get("description"),
-    )
-    return res
+    create = create_group_instance if kwargs["group"] else create_instance
+    create_kwargs = {
+        "org_slug": instance_ctx.get("org_slug"),
+        "space_slug": instance_ctx.get("space_slug"),
+        "instance_name": kwargs["name"],
+        "instance_slug": slug,
+        "instance_description": kwargs.get("description"),
+    }
+    if kwargs["group"]:
+        create_kwargs["editor_emails"] = editor_emails
+    return create(**create_kwargs)
 
 
 # --- Apps: create, derive ---

@@ -461,6 +461,61 @@ def create_instance(
             )
 
 
+def create_group_instance(
+    org_slug: str,
+    space_slug: str,
+    instance_name: str,
+    instance_slug: str,
+    editor_emails: list[str],
+    instance_description: str = None,
+):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        body = {
+            "name": instance_name,
+            "slug": instance_slug,
+            "description": instance_description,
+            "editor_emails": editor_emails,
+        }
+        try:
+            request = api_client.param_serialize(
+                method="POST",
+                resource_path="/instances/v1/org/{org_slug}/space/{space_slug}/group",
+                path_params={"org_slug": org_slug, "space_slug": space_slug},
+                query_params=[],
+                header_params={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                body=body,
+                post_params=[],
+                files={},
+                auth_settings=["ApiKeyAuth"],
+                collection_formats={},
+            )
+            response = api_client.call_api(*request)
+            response.read()
+            return api_client.response_deserialize(
+                response_data=response,
+                response_types_map={
+                    "202": "Task",
+                    "400": "ClientApiError",
+                    "401": "ClientApiError",
+                    "403": "ClientApiError",
+                    "404": "ClientApiError",
+                    "409": "ClientApiError",
+                    "410": "ClientApiError",
+                    "422": "ValidationError",
+                    "500": "ClientApiError",
+                },
+            ).data
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when creating group instance [{instance_name}] in org [{org_slug}], space [{space_slug}]: {e}",
+            )
+
+
 def create_app(
     org_slug: str,
     space_slug: str,
