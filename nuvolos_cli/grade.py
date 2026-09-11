@@ -24,6 +24,7 @@ from .api_client import (
     list_apps,
     list_files,
     list_instances,
+    list_space_members,
     list_spaces,
     start_app,
     stop_app,
@@ -150,6 +151,8 @@ def _wrap_command_with_done_file(
         f": > \"$work/.cmd_exit.$ec\"\n"
         f"exit \"$ec\""
     )
+
+
 def _require_teaching_master(org_slug: str, space_slug: str) -> None:
     """Require the current context to be a teaching-space master instance."""
     try:
@@ -180,7 +183,9 @@ def _require_teaching_master(org_slug: str, space_slug: str) -> None:
             selected = data
             break
     if selected is None:
-        raise ClickException(f"Space '{space_slug}' is not visible in organization '{org_slug}'")
+        raise ClickException(
+            f"Space '{space_slug}' is not visible in organization '{org_slug}'"
+        )
     space_type = str(selected.get("type") or selected.get("space_type") or "").upper()
     if space_type != TEACHING_SPACE_TYPE:
         raise ClickException(
@@ -188,6 +193,7 @@ def _require_teaching_master(org_slug: str, space_slug: str) -> None:
             f"'{space_slug}' is {space_type or 'unknown'}"
         )
     clog.info(f"Validated teaching-space master context: {org_slug}/{space_slug}.")
+
 
 
 def _validate_grade_environment(org_slug: str, space_slug: str) -> None:
@@ -650,6 +656,78 @@ def expand_command_template(
     )
 
 
+def _space_members_by_instance_slug(
+    org_slug: str, space_slug: str
+) -> dict[str, list[dict]]:
+    """Map instance_slug → member dicts via Spaces V1 list members.
+
+    Best-effort: membership lookup failures must not block grading; return {}.
+    """
+    try:
+        members = list_space_members(org_slug=org_slug, space_slug=space_slug) or []
+    except Exception as exc:
+        clog.warning(
+            f"Could not list space members for {org_slug}/{space_slug} "
+            f"(email enrichment skipped): {exc}"
+        )
+        return {}
+
+    by_slug: dict[str, list[dict]] = {}
+    for member in members:
+        data = _model_to_dict(member) if not isinstance(member, dict) else member
+        email = str(data.get("email") or "").strip() or None
+        name = str(data.get("name") or "").strip() or None
+        active = data.get("active")
+        space_role = data.get("space_role")
+        for role_entry in data.get("instance_roles") or []:
+            role_data = (
+                _model_to_dict(role_entry)
+                if not isinstance(role_entry, dict)
+                else role_entry
+            )
+            slug = role_data.get("instance_slug")
+            if not slug:
+                continue
+            by_slug.setdefault(str(slug), []).append(
+                {
+                    "email": email,
+                    "name": name,
+                    "active": active,
+                    "role": role_data.get("role"),
+                    "space_role": space_role,
+                }
+            )
+    clog.info(
+        f"Indexed instance roles for {len(by_slug)} instance(s) from space members."
+    )
+    return by_slug
+
+
+def _email_from_space_members(members: list[dict] | None) -> str | None:
+    """Pick a student email from space-member rows for one instance."""
+    if not members:
+        return None
+    # Prefer EDITOR (typical student on a single-user instance).
+    ordered = sorted(
+        members,
+        key=lambda m: 0 if str(m.get("role") or "").upper() == "EDITOR" else 1,
+    )
+    for member in ordered:
+        email = member.get("email")
+        if email and "@" in str(email):
+            return str(email).strip()
+    return None
+
+
+def _primary_instance_role(members: list[dict] | None) -> str | None:
+    if not members:
+        return None
+    roles = [str(m.get("role")) for m in members if m.get("role")]
+    if "EDITOR" in roles:
+        return "EDITOR"
+    return roles[0] if roles else None
+
+
 def resolve_students(
     manifest: dict,
     org_slug: str,
@@ -658,10 +736,16 @@ def resolve_students(
     instance_filter: str | None = None,
     limit: int | None = None,
 ) -> list[dict]:
-    """Map manifest items to instance slugs; verify visibility via instances list."""
+    """Map manifest items to instance slugs; verify visibility via Client API.
+
+    Uses ``list_instances`` for space membership and ``list_space_members``
+    (Spaces V1 membership models from nuvolos-client-api) for student email
+    and roles when the instance record alone does not carry an email.
+    """
     clog.info(
         f"Resolving students from manifest for {org_slug}/{space_slug}"
-        + (f" (filter={instance_filter})" if instance_filter else "") + "."
+        + (f" (filter={instance_filter})" if instance_filter else "")
+        + "."
     )
     instances = list_instances(org_slug=org_slug, space_slug=space_slug)
     clog.info(f"Found {len(instances)} visible instance(s) in the selected space.")
@@ -672,6 +756,8 @@ def resolve_students(
         if slug:
             by_slug[str(slug)] = d
 
+    members_by_slug = _space_members_by_instance_slug(org_slug, space_slug)
+
     students: list[dict] = []
     for idx, item in enumerate(manifest.get("items") or []):
         slug = instance_slug_from_item(item)
@@ -679,20 +765,26 @@ def resolve_students(
             continue
         meta = by_slug.get(slug)
         instance_name = (meta or {}).get("name")
-        email = _email_from_instance_meta(meta)
+        members = members_by_slug.get(slug) or []
+        email = _email_from_instance_meta(meta) or _email_from_space_members(members)
+        primary_role = _primary_instance_role(members)
         folder_name = item.get("folder_name") or _safe_student_folder_name(
             email or instance_name, slug
         )
-        students.append({
-            "index": idx,
-            "instance_slug": slug,
-            "src": item.get("src"),
-            "target": item.get("target"),
-            "instance_name": instance_name,
-            "email": email,
-            "folder_name": folder_name,
-            "found_in_space": meta is not None,
-        })
+        students.append(
+            {
+                "index": idx,
+                "instance_slug": slug,
+                "src": item.get("src"),
+                "target": item.get("target"),
+                "instance_name": instance_name,
+                "email": email,
+                "folder_name": folder_name,
+                "found_in_space": meta is not None,
+                "instance_role": primary_role,
+                "members": members,
+            }
+        )
 
     if instance_filter and not students:
         raise ClickException(f"No manifest item matched --instance {instance_filter!r}")
@@ -700,6 +792,7 @@ def resolve_students(
         students = students[: max(0, limit)]
     clog.info(f"Resolved {len(students)} student submission(s).")
     return students
+
 
 
 
@@ -1856,6 +1949,7 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
             s["instance_slug"],
             s.get("email") or s.get("folder_name") or "",
             s.get("instance_name") or "",
+            s.get("instance_role") or "",
             "yes" if s["found_in_space"] else "NO",
             s.get("target") or "",
         ]
@@ -1864,7 +1958,14 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     click.echo(
         tabulate(
             rows,
-            headers=["instance_slug", "email", "name", "in_space", "target"],
+            headers=[
+                "instance_slug",
+                "email",
+                "name",
+                "role",
+                "in_space",
+                "target",
+            ],
             tablefmt="github",
         )
     )

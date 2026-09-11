@@ -56,6 +56,28 @@ nuvolos spaces list -o my_org -f json
 nuvolos spaces list
 ```
 
+## Listing Space Members
+
+```bash
+nuvolos spaces members -o my_org -s my_space
+nuvolos spaces members -o my_org -s my_space -f json
+```
+
+Returns space administrators and users who hold instance roles in the space
+(`name`, `email`, `active`, `space_role`, `instance_roles`).
+
+## Inviting Space Administrators
+
+```bash
+nuvolos spaces invite \
+  -o my_org \
+  -s my_space \
+  --email admin@example.com \
+  --role SPACE_ADMIN
+```
+
+Only `SPACE_ADMIN` is supported. Returns an invitation summary.
+
 ## Next Steps
 
 Once you have identified a space, you can:

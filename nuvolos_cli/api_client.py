@@ -21,6 +21,9 @@ from nuvolos_client_api.models import (
     ImageFamilyUpdate,
     ImageUpdate,
     InstanceCreateRequest,
+    GroupInstanceCreateRequest,
+    InstanceInvitationRequest,
+    SpaceInvitationRequest,
     DistributionRequest,
     TableUpdate,
 )
@@ -459,6 +462,126 @@ def create_instance(
                 e,
                 f"Exception when creating instance [{instance_name}] in org [{org_slug}], space [{space_slug}]: {e}",
             )
+
+
+def create_group_instance(
+    org_slug: str,
+    space_slug: str,
+    instance_name: str,
+    instance_slug: str,
+    editor_emails: list[str],
+    instance_description: str = None,
+):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.InstancesV1Api(api_client)
+        body = {
+            "name": instance_name,
+            "slug": instance_slug,
+            "editor_emails": list(editor_emails),
+        }
+        if instance_description is not None:
+            body["description"] = instance_description
+        try:
+            return api_instance.create_group_instance(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                group_instance_create_request=GroupInstanceCreateRequest.from_dict(
+                    body
+                ),
+                _headers={"Content-Type": "application/json"},
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when creating group instance [{instance_name}] in org [{org_slug}], space [{space_slug}]: {e}",
+            )
+
+
+def list_instance_members(org_slug: str, space_slug: str, instance_slug: str):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.InstancesV1Api(api_client)
+        try:
+            return api_instance.get_instance_members(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when listing members for instance [{instance_slug}] in org [{org_slug}], space [{space_slug}]: {e}",
+            )
+
+
+def invite_instance_member(
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    email: str,
+    role: str,
+):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.InstancesV1Api(api_client)
+        try:
+            return api_instance.invite_instance_member(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                instance_invitation_request=InstanceInvitationRequest.from_dict(
+                    {"email": email, "role": role}
+                ),
+                _headers={"Content-Type": "application/json"},
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when inviting [{email}] to instance [{instance_slug}] in org [{org_slug}], space [{space_slug}]: {e}",
+            )
+
+
+def list_space_members(org_slug: str, space_slug: str):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.SpacesV1Api(api_client)
+        try:
+            return api_instance.get_space_members(
+                org_slug=org_slug,
+                space_slug=space_slug,
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when listing members for space [{space_slug}] in org [{org_slug}]: {e}",
+            )
+
+
+def invite_space_member(
+    org_slug: str,
+    space_slug: str,
+    email: str,
+    role: str = "SPACE_ADMIN",
+):
+    config = get_api_config()
+    with nuvolos_client_api.ApiClient(config) as api_client:
+        api_instance = nuvolos_client_api.SpacesV1Api(api_client)
+        try:
+            return api_instance.invite_space_member(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                space_invitation_request=SpaceInvitationRequest.from_dict(
+                    {"email": email, "role": role}
+                ),
+                _headers={"Content-Type": "application/json"},
+            )
+        except nuvolos_client_api.ApiException as e:
+            raise NuvolosCliException.from_api_exception(
+                e,
+                f"Exception when inviting [{email}] to space [{space_slug}] in org [{org_slug}]: {e}",
+            )
+
 
 
 def create_app(

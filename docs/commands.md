@@ -16,10 +16,15 @@ The Nuvolos CLI is organized into the following command groups:
 ### Organization and Space Management
 - `nuvolos orgs list` - List organizations
 - `nuvolos spaces list` - List spaces in an organization
+- `nuvolos spaces members` - List space administrators and instance-role holders
+- `nuvolos spaces invite` - Invite a space administrator
 
 ### Instance Management
 - `nuvolos instances list` - List instances in a space
-- `nuvolos instances create` - Create a new instance
+- `nuvolos instances create` - Create a new instance (add `--group` for group instances)
+- `nuvolos instances members` - List explicit and inherited instance members
+- `nuvolos instances invite` - Invite a user to an instance role
+
 
 See [Instance Management](instance_management.md) for detailed usage.
 
