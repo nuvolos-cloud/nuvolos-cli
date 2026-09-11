@@ -70,9 +70,12 @@ nuvolos grade resolve-manifest \
 `nvcollect_manifest.json`. Use `-f json` for machine-readable output, or
 `-i <instance_slug>` to filter one student.
 
-The table columns are `instance_slug`, `name`, `in_space`, and `target`. Fix
-any `in_space = NO` rows (missing instance or API key without access) before a
-full check, or pass `--skip-missing-instances` on `check`.
+The table columns are `instance_slug`, `email`, `name`, `role`, `in_space`, and
+`target`. Email and role come from the Client API space-members endpoint when
+available (fallback: instance display name). Fix any `in_space = NO` rows
+(missing instance or API key without access) before a full check, or pass
+`--skip-missing-instances` on `check`.
+
 
 ### 3. Run validation on student apps
 

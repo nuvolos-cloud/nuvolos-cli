@@ -24,6 +24,11 @@ from .api_client import (
     wait_for_task,
     get_task,
     create_instance,
+    create_group_instance,
+    list_instance_members,
+    invite_instance_member,
+    list_space_members,
+    invite_space_member,
     create_app,
     derive_app,
     list_images,
@@ -137,6 +142,98 @@ def nv_spaces_list(ctx, **kwargs):
     check_api_key_configured()
     space_ctx = get_effective_space_context(ctx, **kwargs)
     return list_spaces(org_slug=space_ctx.get("org_slug"))
+
+
+@nv_spaces.command("members")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space",
+)
+@click.option(
+    "-f",
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
+)
+@click.pass_context
+@format_response
+def nv_spaces_members(ctx, **kwargs):
+    """
+    Lists space administrators and users with instance roles in a space.
+    """
+    check_api_key_configured()
+    space_ctx = get_effective_instance_context(ctx, **kwargs)
+    if not space_ctx.get("org_slug") or not space_ctx.get("space_slug"):
+        raise click.ClickException(
+            "Missing space context. Please specify both --org and --space (or set them via NV_CONTEXT)"
+        )
+    return list_space_members(
+        org_slug=space_ctx.get("org_slug"),
+        space_slug=space_ctx.get("space_slug"),
+    )
+
+
+@nv_spaces.command("invite")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space",
+)
+@click.option(
+    "--email",
+    type=str,
+    required=True,
+    help="Email address to invite as a space administrator",
+)
+@click.option(
+    "--role",
+    type=click.Choice(["SPACE_ADMIN"], case_sensitive=False),
+    default="SPACE_ADMIN",
+    show_default=True,
+    help="Space role to grant. Only SPACE_ADMIN is supported.",
+)
+@click.option(
+    "-f",
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
+)
+@click.pass_context
+@format_response
+def nv_spaces_invite(ctx, **kwargs):
+    """
+    Invites a user to administer the specified space.
+    """
+    check_api_key_configured()
+    space_ctx = get_effective_instance_context(ctx, **kwargs)
+    if not space_ctx.get("org_slug") or not space_ctx.get("space_slug"):
+        raise click.ClickException(
+            "Missing space context. Please specify both --org and --space (or set them via NV_CONTEXT)"
+        )
+    return invite_space_member(
+        org_slug=space_ctx.get("org_slug"),
+        space_slug=space_ctx.get("space_slug"),
+        email=kwargs["email"],
+        role=kwargs["role"].upper(),
+    )
+
 
 
 @nuvolos.group("instances")
@@ -710,6 +807,23 @@ def nv_info(ctx):
     help="The description of the instance to create",
 )
 @click.option(
+    "--group",
+    is_flag=True,
+    help="Create a group instance and invite editors asynchronously.",
+)
+@click.option(
+    "--editor-email",
+    type=str,
+    multiple=True,
+    help="Email address to invite as a group instance editor. Repeat for multiple editors. Requires --group.",
+)
+@click.option(
+    "-w",
+    "--wait",
+    is_flag=True,
+    help="Wait until the group-instance creation task is complete (only with --group).",
+)
+@click.option(
     "-f",
     "--format",
     type=str,
@@ -720,21 +834,157 @@ def nv_info(ctx):
 @format_response
 def nv_instances_create(ctx, **kwargs):
     """
-    Creates a new instance in the specified space.
+    Creates an individual instance, or a group instance when --group is supplied.
     """
+    editor_emails = list(kwargs["editor_email"])
+    if kwargs["group"] and not editor_emails:
+        raise click.UsageError("--group requires at least one --editor-email")
+    if editor_emails and not kwargs["group"]:
+        raise click.UsageError("--editor-email requires --group")
+    if kwargs.get("wait") and not kwargs["group"]:
+        raise click.UsageError("--wait requires --group")
+
     check_api_key_configured()
     instance_ctx = get_effective_instance_context(ctx, **kwargs)
     from slugify import slugify
 
     slug = kwargs.get("slug") or slugify(kwargs["name"], separator="_")
-    res = create_instance(
+    if kwargs["group"]:
+        task = create_group_instance(
+            org_slug=instance_ctx.get("org_slug"),
+            space_slug=instance_ctx.get("space_slug"),
+            instance_name=kwargs["name"],
+            instance_slug=slug,
+            editor_emails=editor_emails,
+            instance_description=kwargs.get("description"),
+        )
+        if kwargs.get("wait") and task is not None and hasattr(task, "tkid"):
+            clog.info(
+                f"Waiting for group instance creation task {task.tkid} to complete..."
+            )
+            task = wait_for_task(tkid=task.tkid)
+        return task
+
+    return create_instance(
         org_slug=instance_ctx.get("org_slug"),
         space_slug=instance_ctx.get("space_slug"),
         instance_name=kwargs["name"],
         instance_slug=slug,
         instance_description=kwargs.get("description"),
     )
-    return res
+
+
+@nv_instances.command("members")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The slug of the Nuvolos instance",
+)
+@click.option(
+    "-f",
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
+)
+@click.pass_context
+@format_response
+def nv_instances_members(ctx, **kwargs):
+    """
+    Lists explicit and inherited members of an instance.
+    """
+    check_api_key_configured()
+    instance_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    if (
+        not instance_ctx.get("org_slug")
+        or not instance_ctx.get("space_slug")
+        or not instance_ctx.get("instance_slug")
+    ):
+        raise click.ClickException(
+            "Missing instance context. Please specify --org, --space, and --instance (or set them via NV_CONTEXT)"
+        )
+    return list_instance_members(
+        org_slug=instance_ctx.get("org_slug"),
+        space_slug=instance_ctx.get("space_slug"),
+        instance_slug=instance_ctx.get("instance_slug"),
+    )
+
+
+@nv_instances.command("invite")
+@click.option(
+    "-o",
+    "--org",
+    type=str,
+    help="The slug of the Nuvolos organization",
+)
+@click.option(
+    "-s",
+    "--space",
+    type=str,
+    help="The slug of the Nuvolos space",
+)
+@click.option(
+    "-i",
+    "--instance",
+    type=str,
+    help="The slug of the Nuvolos instance",
+)
+@click.option(
+    "--email",
+    type=str,
+    required=True,
+    help="Email address to invite to the instance",
+)
+@click.option(
+    "--role",
+    type=click.Choice(["EDITOR", "VIEWER", "OBSERVER"], case_sensitive=False),
+    required=True,
+    help="Instance role to grant (EDITOR, VIEWER, or OBSERVER).",
+)
+@click.option(
+    "-f",
+    "--format",
+    type=str,
+    default="tabulated",
+    help="Sets the output into the desired format. Available values: `tabulated`, `json`, `yaml`",
+)
+@click.pass_context
+@format_response
+def nv_instances_invite(ctx, **kwargs):
+    """
+    Invites a user to an instance with the requested role.
+    """
+    check_api_key_configured()
+    instance_ctx = get_effective_snapshot_context(ctx, **kwargs)
+    if (
+        not instance_ctx.get("org_slug")
+        or not instance_ctx.get("space_slug")
+        or not instance_ctx.get("instance_slug")
+    ):
+        raise click.ClickException(
+            "Missing instance context. Please specify --org, --space, and --instance (or set them via NV_CONTEXT)"
+        )
+    return invite_instance_member(
+        org_slug=instance_ctx.get("org_slug"),
+        space_slug=instance_ctx.get("space_slug"),
+        instance_slug=instance_ctx.get("instance_slug"),
+        email=kwargs["email"],
+        role=kwargs["role"].upper(),
+    )
+
 
 
 # --- Apps: create, derive ---

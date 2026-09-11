@@ -42,7 +42,7 @@ nuvolos instances list
 
 ## Creating Instances
 
-The `nuvolos instances create` command allows you to create a new instance in a specified space.
+The `nuvolos instances create` command creates an individual instance by default. Add `--group` to explicitly create a group instance and invite editors.
 
 ### Usage
 
@@ -60,13 +60,17 @@ nuvolos instances create [options]
 - `-s, --space TEXT`: Space slug (required if not in context)
 - `--slug TEXT`: URL-friendly slug for the instance. If not provided, it will be auto-generated from the name.
 - `-d, --description TEXT`: Description of the instance
+- `--group`: Create a group instance asynchronously. Requires at least one `--editor-email`.
+- `--editor-email TEXT`: Email address to invite as a group instance editor. Repeat this option for multiple editors. Requires `--group`.
+- `-w, --wait`: Wait until the group-instance creation task completes (only with `--group`).
 - `-f, --format TEXT`: Output format (`tabulated`, `json`, `yaml`)
 
 ### Details
 
 - The instance slug is used in URLs and API calls to identify the instance
 - If no slug is provided, it will be automatically generated from the instance name using slugification (spaces → underscores, lowercase)
-- The creation operation returns an instance object with all details including timestamps
+- Individual creation returns the created instance. Group creation returns a task that can be inspected with `nuvolos tasks get TASK_ID`.
+- `--group` and `--editor-email` must be used together, making group-instance creation explicit at the command line.
 
 ### Examples
 
@@ -85,9 +89,41 @@ nuvolos instances create \
   --slug "prod_instance_001" \
   -d "Main production environment for customer-facing applications"
 
+# Create a group instance and invite editors (async task)
+nuvolos instances create \
+  -o my_org \
+  -s my_space \
+  -n "Team Alpha" \
+  --group \
+  --editor-email alice@example.com \
+  --editor-email bob@example.com
+
 # Create an instance (assuming org and space are in context)
 nuvolos instances create -n "Testing Instance"
 ```
+
+## Listing Instance Members
+
+```bash
+nuvolos instances members -o my_org -s my_space -i my_instance
+nuvolos instances members -o my_org -s my_space -i my_instance -f json
+```
+
+Returns explicit and inherited members (`name`, `email`, `active`, `role`, `role_source`).
+
+## Inviting Instance Members
+
+```bash
+nuvolos instances invite \
+  -o my_org \
+  -s my_space \
+  -i my_instance \
+  --email student@example.com \
+  --role EDITOR
+```
+
+`--role` must be one of `EDITOR`, `VIEWER`, or `OBSERVER`. The command returns an invitation summary (`email`, `role`, `status`, optional `validity_timestamp`).
+
 
 ## Instance Properties
 
