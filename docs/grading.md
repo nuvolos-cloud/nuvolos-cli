@@ -70,11 +70,14 @@ nuvolos grade resolve-manifest \
 `nvcollect_manifest.json`. Use `-f json` for machine-readable output, or
 `-i <instance_slug>` to filter one student.
 
-The table columns are `instance_slug`, `email`, `name`, `role`, `in_space`, and
-`target`. Email and role come from the Client API space-members endpoint when
-available (fallback: instance display name). Fix any `in_space = NO` rows
-(missing instance or API key without access) before a full check, or pass
-`--skip-missing-instances` on `check`.
+The table columns are `instance_slug`, `email`, `name`, `role`, `in_space`,
+`target`, and `in_app_target ({target})`. Email and role come from the
+Client API space-members endpoint when available (fallback: instance display
+name). Fix any `in_space = NO` rows (missing instance or API key without
+access) before a full check, or pass `--skip-missing-instances` on `check`.
+`in_app_target` is empty when the manifest item's handin `src` can't be
+mapped under `/assignments/handin/<instance_slug>/...` — check that student's
+`src` before relying on `{target}` in `-c`.
 
 
 ### 3. Run validation on student apps
@@ -125,12 +128,34 @@ Per student, `check` does:
 |-------------|--------|
 | `{instance_slug}` | Student instance slug |
 | `{instance}` | Same as `{instance_slug}` |
-| `{target}` | Manifest `target` path for that item |
+| `{target}` | In-app path to the student's own submission (see below) |
 
-Example:
+### `{target}`: in-app submission path
+
+`check` starts your instructor workload on each student instance
+(`start_app`) to run the validation command. Whenever an instructor's API
+key starts an app on a student/group instance that has a visible assignment
+bundle, the platform automatically bind-mounts that student's own submitted
+files, read-only, under `/assignments/handin/...` inside the app container —
+the same handin storage nvcollect reads from at
+`/files/assignments-review/handin/<instance_slug>/...` on the master.
+
+`{target}` is pre-computed per student from the manifest and expands to that
+in-app path, so it always points at real files inside the student app (never
+at a master-only path):
 
 ```
--c 'python grade_script.py --student {instance_slug}'
+-c 'python {target}/main.py'
+```
+
+If the manifest has no derivable handin `src` for a student (e.g. a manually
+authored manifest), `{target}` expands to an empty string — inspect the
+`resolve-manifest` output first if you rely on it.
+
+Example combining `{target}` with the per-student slug for logging:
+
+```
+-c 'python grade_script.py --student {instance_slug} --submission {target}'
 ```
 
 ## Useful flags on `check`
@@ -142,10 +167,25 @@ Example:
 | `--all` | Process every resolved student; ignores `--limit` |
 | `-i` / `--instance` | Only this student instance slug |
 | `--parallel N` | Run up to *N* student checks concurrently (requires `--continue-on-error` for true parallelism; otherwise forced sequential so the run can stop on first failure) |
+| `--exec-timeout N` | Seconds to wait for the validation command to finish before giving up. `0` disables the timeout (wait indefinitely) — use when the command itself must stay up for a long external test run. Default: `GRADE_EXEC_TIMEOUT_SECS` env var, or `600` |
 | `--continue-on-error` | Keep going after a lifecycle/validation failure |
 | `--skip-missing-instances` | Skip manifest instances not visible via `instances list` |
 | `--pull-logs` / `--no-pull-logs` | After execute, copy logs to instructor (default: pull) |
 | `--instructor-instance` | Instructor instance that receives distributed logs (default: `NV_CONTEXT` instance or `master`) |
+
+If your validation command needs to keep a server running for a long
+external test (e.g. a chatbot server polled by another platform for up to an
+hour), make `-c` itself block for that duration — e.g. wrap it with
+`timeout 3600 ...` or have it wait on a signal from the external platform —
+and raise `--exec-timeout` above that duration (or pass `0` to disable it
+entirely):
+
+```
+nuvolos grade check \
+  -c 'timeout 3600 python server.py' \
+  --exec-timeout 4200 \
+  ...
+```
 
 If any student fails and `--dry-run` is not set, `check` exits non-zero and
 points at the results JSON.

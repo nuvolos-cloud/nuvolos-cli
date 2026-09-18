@@ -17,6 +17,7 @@ from nuvolos_cli.grade import (
     _email_from_space_members,
     _space_members_by_instance_slug,
     expand_command_template,
+    in_student_handin_path,
     resolve_students,
 )
 from nuvolos_cli.interface import nuvolos
@@ -153,11 +154,28 @@ def test_grade_rejects_non_master_context(runner, monkeypatch):
 
 def test_expand_command_template_placeholders():
     out = expand_command_template(
-        "python run.py --s {instance_slug} --t {target} --i {instance}",
+        "python run.py --s {instance_slug} --i {instance} --t {target}",
         instance_slug="stu_1",
-        target="/files/collected/stu_1",
+        target="/assignments/handin/hw1/submission",
     )
-    assert out == "python run.py --s stu_1 --t /files/collected/stu_1 --i stu_1"
+    assert out == (
+        "python run.py --s stu_1 --i stu_1 --t /assignments/handin/hw1/submission"
+    )
+
+
+def test_in_student_handin_path_maps_master_src_to_in_app_mount():
+    src = "/files/assignments-review/handin/stu_a/hw1/2026-01-01_00:00:00_abcd/submission"
+    out = in_student_handin_path(src, "stu_a")
+    assert out == "/assignments/handin/hw1/2026-01-01_00:00:00_abcd/submission"
+
+
+def test_in_student_handin_path_none_for_unrelated_src():
+    assert in_student_handin_path(None, "stu_a") is None
+    assert in_student_handin_path("/files/other/stu_a/x", "stu_a") is None
+    # Different student's slug in the path must not match.
+    assert in_student_handin_path(
+        "/files/assignments-review/handin/stu_b/hw1/submission", "stu_a"
+    ) is None
 
 
 def test_email_from_space_members_prefers_editor():
@@ -236,6 +254,7 @@ def test_resolve_students_uses_instances_and_space_members():
     assert alice["email"] == "alice@ex.com"
     assert alice["instance_role"] == "EDITOR"
     assert alice["folder_name"] == "alice@ex.com"
+    assert alice["in_app_target"] == "/assignments/handin/a/ts"
 
     missing = students[1]
     assert missing["instance_slug"] == "missing"
@@ -388,3 +407,52 @@ def test_grade_collect_invokes_nuvolos_collect(runner, tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     collect.assert_called_once()
     assert "Collect completed" in result.output
+
+
+def test_wait_for_execute_completion_zero_disables_timeout(monkeypatch):
+    """--exec-timeout 0 must poll indefinitely instead of failing instantly."""
+    from nuvolos_cli import grade as grade_mod
+
+    calls = {"n": 0}
+
+    def fake_list_files(**kwargs):
+        calls["n"] += 1
+        # First call: not there yet. Second+: file present with stable size.
+        if calls["n"] < 2:
+            return []
+        return [{"name": ".cmd_done", "size": 1}]
+
+    monkeypatch.setattr(grade_mod, "list_files", fake_list_files)
+    monkeypatch.setattr(grade_mod, "_parse_exit_code_from_listing", lambda **kw: 0)
+    monkeypatch.setattr(grade_mod.time, "sleep", lambda _seconds: None)
+
+    exit_code = grade_mod._wait_for_execute_completion(
+        org_slug="org1",
+        space_slug="space1",
+        instance_slug="stu_1",
+        done_file="/files/.nuvolos_grade/run/stu_1/.cmd_done",
+        timeout_secs=0,
+    )
+    assert exit_code == 0
+    assert calls["n"] >= 2
+
+
+def test_wait_for_execute_completion_finite_timeout_raises(monkeypatch):
+    from nuvolos_cli import grade as grade_mod
+    from click import ClickException
+
+    monkeypatch.setattr(grade_mod, "list_files", lambda **kwargs: [])
+    monkeypatch.setattr(grade_mod.time, "sleep", lambda _seconds: None)
+    # Force the deadline to already be in the past so the loop exits on the
+    # first iteration instead of actually waiting real time in the test.
+    times = iter([1000.0, 1000.0, 2000.0])
+    monkeypatch.setattr(grade_mod.time, "time", lambda: next(times))
+
+    with pytest.raises(ClickException, match="Timed out after 5s"):
+        grade_mod._wait_for_execute_completion(
+            org_slug="org1",
+            space_slug="space1",
+            instance_slug="stu_1",
+            done_file="/files/.nuvolos_grade/run/stu_1/.cmd_done",
+            timeout_secs=5,
+        )
