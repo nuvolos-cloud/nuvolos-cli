@@ -315,6 +315,35 @@ def instance_slug_from_item(item: dict) -> str:
     raise ClickException(f"Cannot derive instance_slug from manifest item: {item!r}")
 
 
+IN_APP_HANDIN_ROOT = "/assignments/handin"
+
+
+def in_student_handin_path(src: str | None, instance_slug: str) -> str | None:
+    """Map a collected handin ``src`` path to the in-student mount path.
+
+    Whenever an instructor's API key starts an app on a student/group
+    instance in a teaching space that has an assignment bundle, the platform
+    automatically bind-mounts that student's own submitted files, read-only,
+    at ``/assignments/handin/...`` inside the app container (nv-backend:
+    ``instructor_with_assignment_in_student_instance``). That is exactly what
+    ``grade check`` triggers via ``start_app``. The mounted tree is the same
+    physical handin storage nvcollect's ``collect()`` reads via
+    ``/files/assignments-review/handin/<instance_slug>/...`` on the master —
+    so re-rooting the manifest ``src`` under ``/assignments/handin`` yields a
+    path that resolves inside the student app.
+    """
+    if not src:
+        return None
+    prefix = f"{HANDIN_REVIEW_ROOT}/{instance_slug}"
+    text = str(src).rstrip("/")
+    if text == prefix:
+        return IN_APP_HANDIN_ROOT
+    if not text.startswith(prefix + "/"):
+        return None
+    remainder = text[len(prefix) + 1 :]
+    return f"{IN_APP_HANDIN_ROOT}/{remainder}"
+
+
 def _manifest_file_path(target_folder: str | Path) -> Path:
     path = Path(target_folder).expanduser()
     if path.is_file():
@@ -647,8 +676,16 @@ def handback_collected_results(collect_dir: str | Path) -> dict:
 
 
 def expand_command_template(
-    template: str, *, instance_slug: str, target: str = ""
+    template: str, *, instance_slug: str, target: str | None = None
 ) -> str:
+    """Expand {instance_slug} / {instance} / {target} placeholders.
+
+    ``{target}`` is the platform-mounted in-student path to that student's
+    own submission (``/assignments/handin/...``, see
+    ``in_student_handin_path``) — NOT the collect path on the
+    instructor/master instance, which would not be reachable from inside the
+    student app the command runs in.
+    """
     return (
         template.replace("{instance_slug}", instance_slug)
         .replace("{instance}", instance_slug)
@@ -777,6 +814,7 @@ def resolve_students(
                 "instance_slug": slug,
                 "src": item.get("src"),
                 "target": item.get("target"),
+                "in_app_target": in_student_handin_path(item.get("src"), slug),
                 "instance_name": instance_name,
                 "email": email,
                 "folder_name": folder_name,
@@ -853,7 +891,7 @@ def _wait_for_files_area_path(
     space_slug: str,
     instance_slug: str,
     rel_path: str,
-    timeout_secs: int = 90,
+    timeout_secs: int | None = 90,
     stable_rounds: int = 2,
     require_nonzero_size: bool = True,
 ) -> bool:
@@ -861,6 +899,7 @@ def _wait_for_files_area_path(
 
     When require_nonzero_size is True (default), size 0 is not treated as
     complete — empty files can appear while a command is still running.
+    ``timeout_secs=None`` polls indefinitely (no deadline).
     """
     start = time.time()
     last_size = None
@@ -869,7 +908,7 @@ def _wait_for_files_area_path(
     name = Path(rel_path).name
     if parent in (".", ""):
         parent = ""
-    while time.time() - start < timeout_secs:
+    while timeout_secs is None or time.time() - start < timeout_secs:
         try:
             entries = list_files(
                 org_slug=org_slug,
@@ -954,9 +993,15 @@ def _wait_for_execute_completion(
     done_file: str,
     timeout_secs: int | None = None,
 ) -> int:
-    """Block until the done-file exists; return the validation exit code."""
+    """Block until the done-file exists; return the validation exit code.
+
+    ``timeout_secs=0`` disables the timeout and waits indefinitely.
+    ``timeout_secs=None`` (default) falls back to the GRADE_EXEC_TIMEOUT_SECS
+    env var, then 600.
+    """
     if timeout_secs is None:
         timeout_secs = int(os.environ.get("GRADE_EXEC_TIMEOUT_SECS", "600"))
+    no_timeout = timeout_secs == 0
     rel = _files_area_rel(done_file)
     if not rel:
         raise ClickException(f"Invalid done file path: {done_file}")
@@ -965,14 +1010,14 @@ def _wait_for_execute_completion(
         work_rel = ""
     clog.info(
         f"[{instance_slug}] waiting for command completion via {done_file} "
-        f"(timeout={timeout_secs}s)."
+        + ("(no timeout)." if no_timeout else f"(timeout={timeout_secs}s).")
     )
     ok = _wait_for_files_area_path(
         org_slug=org_slug,
         space_slug=space_slug,
         instance_slug=instance_slug,
         rel_path=rel,
-        timeout_secs=timeout_secs,
+        timeout_secs=None if no_timeout else timeout_secs,
         stable_rounds=1,
         require_nonzero_size=True,
     )
@@ -1297,6 +1342,7 @@ def test_one_student(
     student_folder: str | None = None,
     instructor_instance_slug: str = "master",
     pull_logs: bool = True,
+    exec_timeout_secs: int | None = None,
 ) -> dict:
     """Start → wait RUNNING → execute → pull logs to instructor → stop."""
     folder = student_folder or instance_slug
@@ -1482,6 +1528,7 @@ def test_one_student(
             space_slug=space_slug,
             instance_slug=instance_slug,
             done_file=done_file,
+            timeout_secs=exec_timeout_secs,
         )
         record["execute"]["exit_code"] = exit_code
         if exit_code != 0:
@@ -1556,6 +1603,7 @@ def run_grade_check(
     parallel: int = 1,
     pull_logs: bool = True,
     instructor_instance_slug: str | None = None,
+    exec_timeout_secs: int | None = None,
 ) -> dict:
     """Orchestrator: collect → test → publish into handin/handback structure.
 
@@ -1670,6 +1718,7 @@ def run_grade_check(
         "dry_run": dry_run,
         "parallel": parallel,
         "pull_logs": pull_logs,
+        "exec_timeout_secs": exec_timeout_secs,
         "instructor_instance_slug": instructor_instance_slug,
         "staging_root": work_root,
         "staging_run_dir": run_results_abs,
@@ -1697,15 +1746,15 @@ def run_grade_check(
             command=expand_command_template(
                 command,
                 instance_slug=slug,
-                target=str(student.get("target") or ""),
+                target=student.get("in_app_target"),
             ),
             dry_run=dry_run,
             run_id=run_id,
             results_root=work_root,
-
             student_folder=folder,
             instructor_instance_slug=instructor_instance_slug,
             pull_logs=pull_logs,
+            exec_timeout_secs=exec_timeout_secs,
         )
         rec.update(
             {
@@ -1952,6 +2001,7 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
             s.get("instance_role") or "",
             "yes" if s["found_in_space"] else "NO",
             s.get("target") or "",
+            s.get("in_app_target") or "",
         ]
         for s in students
     ]
@@ -1965,6 +2015,7 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
                 "role",
                 "in_space",
                 "target",
+                "in_app_target ({target})",
             ],
             tablefmt="github",
         )
@@ -2015,7 +2066,9 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     help=(
         "Shell command to run inside each student app (cwd=/files). "
         "Example: 'python assignments/main.py'. "
-        "Placeholders: {instance_slug}, {instance}, {target}."
+        "Placeholders: {instance_slug}, {instance}, {target} "
+        "(in-app mounted path to the student's own submission, "
+        "/assignments/handin/...)."
     ),
 )
 @click.option(
@@ -2078,6 +2131,18 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     help="Run up to N student checks concurrently.",
 )
 @click.option(
+    "--exec-timeout",
+    "exec_timeout",
+    type=click.IntRange(min=0),
+    default=None,
+    help=(
+        "Seconds to wait for the validation command to finish before giving up. "
+        "0 disables the timeout (wait indefinitely) — use for long-running "
+        "servers tested by an external platform. "
+        "Default: GRADE_EXEC_TIMEOUT_SECS env var, or 600."
+    ),
+)
+@click.option(
     "--all",
     "grade_all",
     is_flag=True,
@@ -2115,6 +2180,7 @@ def nv_grade_check(
     skip_missing_instances,
     limit,
     parallel,
+    exec_timeout,
     grade_all,
     pull_logs,
     instructor_instance,
@@ -2156,6 +2222,7 @@ def nv_grade_check(
         manifest_path=manifest,
         limit=limit,
         parallel=parallel,
+        exec_timeout_secs=exec_timeout,
         instance_filter=instance,
         dry_run=dry_run,
         continue_on_error=continue_on_error,
