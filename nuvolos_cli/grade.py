@@ -7,8 +7,11 @@ each selected student application.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import signal
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -21,6 +24,7 @@ from tabulate import tabulate
 from .api_client import (
     distribute_content,
     execute_command_in_app,
+    list_all_running_workloads_for_app,
     list_apps,
     list_files,
     list_instances,
@@ -49,6 +53,218 @@ GRADE_META_FILENAME = "grade_meta.json"
 # dedicated child directory so they never collide with identically named
 # files already present in a student's submission.
 GRADE_ARTIFACTS_DIRNAME = "_grading"
+
+
+# ---------------------------------------------------------------------------
+# Abort-safe tracking of student apps started during a grade run.
+# Without this, Ctrl+C / SIGTERM can leave workloads running so a later
+# re-run stacks a second bot/process on the same student app.
+# ---------------------------------------------------------------------------
+
+
+class _StartedAppRegistry:
+    """Thread-safe set of student apps this grade run has started."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._apps: dict[tuple[str, str, str, str], bool] = {}
+        self._aborted = threading.Event()
+
+    @property
+    def aborted(self) -> bool:
+        return self._aborted.is_set()
+
+    def request_abort(self) -> None:
+        with self._lock:
+            self._aborted.set()
+
+    def start_app_if_active(
+        self, org_slug: str, space_slug: str, instance_slug: str, app_slug: str
+    ) -> bool:
+        key = (org_slug, space_slug, instance_slug, app_slug)
+        with self._lock:
+            if self._aborted.is_set():
+                return False
+            self._apps[key] = True
+            start_app(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                app_slug=app_slug,
+                node_pool=None,
+            )
+            return True
+
+    def add(
+        self, org_slug: str, space_slug: str, instance_slug: str, app_slug: str
+    ) -> None:
+        key = (org_slug, space_slug, instance_slug, app_slug)
+        with self._lock:
+            self._apps[key] = True
+
+    def remove(
+        self, org_slug: str, space_slug: str, instance_slug: str, app_slug: str
+    ) -> None:
+        key = (org_slug, space_slug, instance_slug, app_slug)
+        with self._lock:
+            self._apps.pop(key, None)
+
+    def snapshot(self) -> list[tuple[str, str, str, str]]:
+        with self._lock:
+            return list(self._apps.keys())
+
+    def stop_all(self) -> int:
+        """Best-effort stop every tracked app. Returns how many stop calls ran."""
+        apps = self.snapshot()
+        stopped = 0
+        for org_slug, space_slug, instance_slug, app_slug in apps:
+            try:
+                clog.info(
+                    f"[abort-cleanup] stopping app [{app_slug}] on [{instance_slug}]."
+                )
+                stop_app(
+                    org_slug=org_slug,
+                    space_slug=space_slug,
+                    instance_slug=instance_slug,
+                    app_slug=app_slug,
+                )
+                stopped += 1
+                self.remove(org_slug, space_slug, instance_slug, app_slug)
+            except Exception as exc:
+                clog.error(
+                    f"[abort-cleanup] failed to stop app [{app_slug}] on "
+                    f"[{instance_slug}]: {exc}"
+                )
+        return stopped
+
+
+_active_registry_lock = threading.Lock()
+_active_registry: _StartedAppRegistry | None = None
+
+
+def _get_active_registry() -> _StartedAppRegistry | None:
+    with _active_registry_lock:
+        return _active_registry
+
+
+def _set_active_registry(registry: _StartedAppRegistry | None) -> None:
+    global _active_registry
+    with _active_registry_lock:
+        _active_registry = registry
+
+
+def _abort_requested() -> bool:
+    registry = _get_active_registry()
+    return registry is not None and registry.aborted
+
+
+def _atexit_stop_started_apps() -> None:
+    registry = _get_active_registry()
+    if registry is None:
+        return
+    leftover = registry.snapshot()
+    if not leftover:
+        return
+    clog.warning(
+        f"Process exiting with {len(leftover)} student app(s) still tracked; "
+        f"attempting stop."
+    )
+    registry.stop_all()
+
+
+atexit.register(_atexit_stop_started_apps)
+
+
+def _install_grade_abort_handlers(registry: _StartedAppRegistry) -> dict:
+    """Install SIGINT/SIGTERM handlers that flag abort and interrupt main."""
+    previous: dict = {}
+
+    def _handler(signum, frame):  # noqa: ARG001
+        try:
+            signame = signal.Signals(signum).name
+        except (ValueError, AttributeError):
+            signame = str(signum)
+        clog.warning(
+            f"Received {signame}; aborting grade run and stopping student apps."
+        )
+        registry.request_abort()
+        raise KeyboardInterrupt(f"grade aborted by {signame}")
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous[sig] = signal.getsignal(sig)
+            signal.signal(sig, _handler)
+        except (ValueError, OSError) as exc:
+            # Not on main thread, or platform rejects the signal.
+            clog.debug(f"Could not install handler for {sig}: {exc}")
+    return previous
+
+
+def _restore_grade_abort_handlers(previous: dict) -> None:
+    for sig, handler in previous.items():
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError):
+            pass
+
+
+def _best_effort_stop_app(
+    *,
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    app_slug: str,
+    reason: str,
+) -> bool:
+    """Stop a student app; return True on success. Never raises."""
+    try:
+        clog.info(
+            f"[{instance_slug}] stopping app [{app_slug}] ({reason})."
+        )
+        stop_app(
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=instance_slug,
+            app_slug=app_slug,
+        )
+        return True
+    except Exception as exc:
+        clog.error(
+            f"[{instance_slug}] failed to stop app [{app_slug}] ({reason}): {exc}"
+        )
+        return False
+
+
+def _stop_app_if_running(
+    *,
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    app_slug: str,
+    reason: str,
+) -> bool:
+    """Stop only when a workload is present; silent no-op if already stopped."""
+    try:
+        workloads = list_all_running_workloads_for_app(
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=instance_slug,
+            app_slug=app_slug,
+        )
+    except Exception as exc:
+        clog.debug(
+            f"[{instance_slug}] could not list workloads before stop ({reason}): {exc}"
+        )
+        workloads = None
+    if workloads is not None and len(workloads) == 0:
+        return False
+    return _best_effort_stop_app(
+        org_slug=org_slug,
+        space_slug=space_slug,
+        instance_slug=instance_slug,
+        app_slug=app_slug,
+        reason=reason,
+    )
 
 
 def _as_files_abs_path(path: str | Path) -> str:
@@ -909,6 +1125,10 @@ def _wait_for_files_area_path(
     if parent in (".", ""):
         parent = ""
     while timeout_secs is None or time.time() - start < timeout_secs:
+        if _abort_requested():
+            raise KeyboardInterrupt(
+                f"grade aborted while waiting for {rel_path} on [{instance_slug}]"
+            )
         try:
             entries = list_files(
                 org_slug=org_slug,
@@ -1469,18 +1689,40 @@ def test_one_student(
             }
 
 
+    registry = _get_active_registry()
     try:
-        click.echo(
-            f"\n>>> [{instance_slug}] ({folder}) starting app [{app_slug}] (1/5)…"
-        )
-        clog.info(f"[{instance_slug}] starting app [{app_slug}] (1/5).")
-        start_app(
+        if _abort_requested():
+            raise KeyboardInterrupt(
+                f"grade aborted before starting [{instance_slug}]"
+            )
+        # Clear leftover workload from a previous aborted run so a restart
+        # does not stack a second bot/process on the same student app.
+        _stop_app_if_running(
             org_slug=org_slug,
             space_slug=space_slug,
             instance_slug=instance_slug,
             app_slug=app_slug,
-            node_pool=None,
+            reason="pre-start orphan cleanup",
         )
+        click.echo(
+            f"\n>>> [{instance_slug}] ({folder}) starting app [{app_slug}] (1/5)…"
+        )
+        clog.info(f"[{instance_slug}] starting app [{app_slug}] (1/5).")
+        if registry is not None:
+            if not registry.start_app_if_active(
+                org_slug, space_slug, instance_slug, app_slug
+            ):
+                raise KeyboardInterrupt(
+                    f"grade aborted before starting [{instance_slug}]"
+                )
+        else:
+            start_app(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                app_slug=app_slug,
+                node_pool=None,
+            )
         started = True
         click.echo(f">>> [{instance_slug}] waiting until app is RUNNING…")
         wait_for_app_running(
@@ -1488,9 +1730,14 @@ def test_one_student(
             space_slug=space_slug,
             instance_slug=instance_slug,
             app_slug=app_slug,
+            should_abort=_abort_requested,
         )
         clog.info(f"[{instance_slug}] app is running (2/5).")
         click.echo(f">>> [{instance_slug}] app is RUNNING (2/5).")
+        if _abort_requested():
+            raise KeyboardInterrupt(
+                f"grade aborted after app start on [{instance_slug}]"
+            )
         if not run_id or results_root is None:
             raise ClickException(
                 f"[{instance_slug}] internal error: run_id and results_root "
@@ -1545,8 +1792,11 @@ def test_one_student(
 
         _try_pull_logs("after command completion")
 
-
-
+    except KeyboardInterrupt:
+        record["status"] = "aborted"
+        record["error"] = record.get("error") or "grade run aborted"
+        clog.warning(f"Student [{instance_slug}] aborted.")
+        raise
     except Exception as exc:
         record["status"] = "failed"
         record["error"] = str(exc)
@@ -1555,31 +1805,27 @@ def test_one_student(
         # results-dir before the app is stopped.
         _try_pull_logs("after failure/timeout")
     finally:
-        if started and not logs_pulled:
+        if started and not logs_pulled and not _abort_requested():
             _try_pull_logs("before stop")
         if started:
-            try:
-                clog.info(f"[{instance_slug}] stopping app [{app_slug}].")
-                stop_app(
-                    org_slug=org_slug,
-                    space_slug=space_slug,
-                    instance_slug=instance_slug,
-                    app_slug=app_slug,
-                )
-                record["stopped"] = True
-            except Exception as stop_exc:
-                record["stopped"] = False
-                record["stop_error"] = str(stop_exc)
-                clog.error(
-                    f"Failed to stop app [{app_slug}] on [{instance_slug}]: {stop_exc}"
-                )
+            ok = _best_effort_stop_app(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                app_slug=app_slug,
+                reason="end of student check",
+            )
+            record["stopped"] = ok
+            if not ok:
+                record["stop_error"] = record.get("stop_error") or "stop_app failed"
+            if registry is not None and ok:
+                registry.remove(org_slug, space_slug, instance_slug, app_slug)
         record["finished_at"] = _utc_now_iso()
         clog.info(
             f"[{instance_slug}] finished: status={record['status']}, "
             f"stopped={record['stopped']}."
         )
     return record
-
 
 
 
@@ -1794,108 +2040,164 @@ def run_grade_check(
         f"{summary['counts']['skipped']} skipped; "
         f"continue_on_error={continue_on_error}."
     )
+    registry = _StartedAppRegistry()
+    previous_handlers = _install_grade_abort_handlers(registry)
+    _set_active_registry(registry)
     records: list[dict] = []
-    if dry_run or worker_count == 1:
-        for idx, student in enumerate(runnable):
-            rec = process(student)
-            records.append(rec)
-            failed = rec.get("status") not in ("executed", "dry_run", "skipped")
-            if failed and not continue_on_error and not dry_run:
-                remaining = runnable[idx + 1 :]
-                if remaining:
-                    clog.error(
-                        f"Stopping after failure on [{rec.get('instance_slug')}]; "
-                        f"{len(remaining)} student(s) not processed "
-                        f"(pass --continue-on-error to keep going)."
-                    )
-                for skipped_student in remaining:
-                    records.append(
-                        {
-                            **skipped_student,
-                            "status": "skipped",
-                            "error": (
-                                "Skipped because a previous student failed and "
-                                "--continue-on-error was not set."
-                            ),
-                            "finished_at": _utc_now_iso(),
-                        }
-                    )
-                break
-    else:
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [executor.submit(process, student) for student in runnable]
-            records = [future.result() for future in futures]
-
-    for rec in records:
-        summary["students"].append(rec)
-        status = rec.get("status")
-        if status == "dry_run":
-            summary["counts"]["dry_run"] += 1
-        elif status == "executed":
-            summary["counts"]["ok"] += 1
-        elif status == "skipped":
-            summary["counts"]["skipped"] += 1
+    try:
+        if dry_run or worker_count == 1:
+            for idx, student in enumerate(runnable):
+                if _abort_requested():
+                    raise KeyboardInterrupt("grade aborted")
+                try:
+                    rec = process(student)
+                except KeyboardInterrupt:
+                    registry.request_abort()
+                    raise
+                records.append(rec)
+                failed = rec.get("status") not in ("executed", "dry_run", "skipped")
+                if failed and not continue_on_error and not dry_run:
+                    remaining = runnable[idx + 1 :]
+                    if remaining:
+                        clog.error(
+                            f"Stopping after failure on [{rec.get('instance_slug')}]; "
+                            f"{len(remaining)} student(s) not processed "
+                            f"(pass --continue-on-error to keep going)."
+                        )
+                    for skipped_student in remaining:
+                        records.append(
+                            {
+                                **skipped_student,
+                                "status": "skipped",
+                                "error": (
+                                    "Skipped because a previous student failed and "
+                                    "--continue-on-error was not set."
+                                ),
+                                "finished_at": _utc_now_iso(),
+                            }
+                        )
+                    break
         else:
-            summary["counts"]["failed"] += 1
-        clog.info(
-            f"Grade progress: {len(summary['students'])}/{len(students)} completed "
-            f"(ok={summary['counts']['ok']}, failed={summary['counts']['failed']}, "
-            f"skipped={summary['counts']['skipped']})."
-        )
-        if not dry_run and worker_count == 1:
-            time.sleep(1)
-
-
-    summary["finished_at"] = _utc_now_iso()
-
-    # Publish each student's artifacts into handin + handback path structure.
-    if not dry_run:
-        for rec in summary["students"]:
-            if rec.get("status") in ("skipped", "dry_run", "pending"):
-                continue
+            executor = ThreadPoolExecutor(max_workers=worker_count)
+            futures = [executor.submit(process, student) for student in runnable]
             try:
-                rec["handin_publish"] = publish_student_results_to_handin_structure(
-                    student_record=rec,
-                    run_id=run_id,
-                )
-            except Exception as exc:
-                rec["handin_publish"] = {"error": str(exc)}
+                for future in futures:
+                    if _abort_requested():
+                        raise KeyboardInterrupt("grade aborted")
+                    records.append(future.result())
+            except KeyboardInterrupt:
+                registry.request_abort()
+                for future in futures:
+                    future.cancel()
+                # Stop apps immediately; do not wait on blocked workers.
+                n_stopped = registry.stop_all()
                 clog.warning(
-                    f"[{rec.get('instance_slug')}] handin publish failed: {exc}"
+                    f"Parallel grade abort: issued stop for {n_stopped} app(s); "
+                    f"shutting down workers without waiting."
                 )
-            publish_error = (rec.get("handin_publish") or {}).get("error")
-            if publish_error and rec.get("status") == "executed":
-                rec["status"] = "failed"
-                rec["error"] = rec.get("error") or f"publish failed: {publish_error}"
-                summary["counts"]["ok"] -= 1
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+            else:
+                executor.shutdown(wait=True, cancel_futures=False)
+
+        for rec in records:
+            summary["students"].append(rec)
+            status = rec.get("status")
+            if status == "dry_run":
+                summary["counts"]["dry_run"] += 1
+            elif status == "executed":
+                summary["counts"]["ok"] += 1
+            elif status == "skipped":
+                summary["counts"]["skipped"] += 1
+            else:
+                summary["counts"]["failed"] += 1
+            clog.info(
+                f"Grade progress: {len(summary['students'])}/{len(students)} completed "
+                f"(ok={summary['counts']['ok']}, failed={summary['counts']['failed']}, "
+                f"skipped={summary['counts']['skipped']})."
+            )
+            if not dry_run and worker_count == 1:
+                time.sleep(1)
+
+        summary["finished_at"] = _utc_now_iso()
+
+        # Publish each student's artifacts into handin + handback path structure.
+        if not dry_run:
+            for rec in summary["students"]:
+                if rec.get("status") in ("skipped", "dry_run", "pending", "aborted"):
+                    continue
+                try:
+                    rec["handin_publish"] = publish_student_results_to_handin_structure(
+                        student_record=rec,
+                        run_id=run_id,
+                    )
+                except Exception as exc:
+                    rec["handin_publish"] = {"error": str(exc)}
+                    clog.warning(
+                        f"[{rec.get('instance_slug')}] handin publish failed: {exc}"
+                    )
+                publish_error = (rec.get("handin_publish") or {}).get("error")
+                if publish_error and rec.get("status") == "executed":
+                    rec["status"] = "failed"
+                    rec["error"] = rec.get("error") or f"publish failed: {publish_error}"
+                    summary["counts"]["ok"] -= 1
+                    summary["counts"]["failed"] += 1
+
+            # Full-tree handback so students see feedback in the assignment UI (readonly).
+            collect_for_handback = summary.get("target_folder") or run_results_abs
+            if collect_for_handback and Path(collect_for_handback).expanduser().is_file():
+                collect_for_handback = str(
+                    Path(collect_for_handback).expanduser().parent
+                )
+            summary["handback"] = handback_collected_results(collect_for_handback)
+            if summary["handback"].get("status") == "failed":
                 summary["counts"]["failed"] += 1
 
-        # Full-tree handback so students see feedback in the assignment UI (readonly).
-        collect_for_handback = summary.get("target_folder") or run_results_abs
-        if collect_for_handback and Path(collect_for_handback).expanduser().is_file():
-            collect_for_handback = str(Path(collect_for_handback).expanduser().parent)
-        summary["handback"] = handback_collected_results(collect_for_handback)
-        if summary["handback"].get("status") == "failed":
-            summary["counts"]["failed"] += 1
-
-    # No _nuvolos_grade_runs / grade_run_*.json — durable artifacts are only
-    # per-student output.log + grade_meta.json under handin/handback.
-    summary.pop("results_file", None)
-    summary.pop("results_run_dir", None)
-    clog.info(
-        f"Grade run complete: ok={summary['counts']['ok']}, "
-        f"failed={summary['counts']['failed']}, skipped={summary['counts']['skipped']}, "
-        f"dry_run={summary['counts']['dry_run']}. "
-        f"Per-student files: handin+handback output.log / grade_meta.json."
-    )
-    click.echo(
-        f"\n=== Grade run {run_id} complete ===\n"
-        f"  ok={summary['counts']['ok']}  failed={summary['counts']['failed']}  "
-        f"skipped={summary['counts']['skipped']}  dry_run={summary['counts']['dry_run']}\n"
-        f"  Durable paths: {HANDIN_REVIEW_ROOT}/… and {HANDBACK_REVIEW_ROOT}/… "
-        f"(students see handback, read-only)."
-    )
-    return summary
+        # No _nuvolos_grade_runs / grade_run_*.json — durable artifacts are only
+        # per-student output.log + grade_meta.json under handin/handback.
+        summary.pop("results_file", None)
+        summary.pop("results_run_dir", None)
+        clog.info(
+            f"Grade run complete: ok={summary['counts']['ok']}, "
+            f"failed={summary['counts']['failed']}, skipped={summary['counts']['skipped']}, "
+            f"dry_run={summary['counts']['dry_run']}. "
+            f"Per-student files: handin+handback output.log / grade_meta.json."
+        )
+        click.echo(
+            f"\n=== Grade run {run_id} complete ===\n"
+            f"  ok={summary['counts']['ok']}  failed={summary['counts']['failed']}  "
+            f"skipped={summary['counts']['skipped']}  dry_run={summary['counts']['dry_run']}\n"
+            f"  Durable paths: {HANDIN_REVIEW_ROOT}/… and {HANDBACK_REVIEW_ROOT}/… "
+            f"(students see handback, read-only)."
+        )
+        return summary
+    except KeyboardInterrupt:
+        registry.request_abort()
+        n_stopped = registry.stop_all()
+        summary["aborted"] = True
+        summary["finished_at"] = _utc_now_iso()
+        # Keep any student records gathered before the interrupt.
+        for rec in records:
+            if rec in summary["students"]:
+                continue
+            summary["students"].append(rec)
+        clog.warning(
+            f"Grade run aborted; stopped {n_stopped} student app workload(s)."
+        )
+        click.echo(
+            f"\n!!! Grade run aborted — stopped {n_stopped} student app workload(s)."
+        )
+        raise ClickException(
+            f"Grade run aborted; stopped {n_stopped} student app workload(s)."
+        ) from None
+    finally:
+        leftover = registry.stop_all()
+        if leftover:
+            clog.warning(
+                f"Final cleanup stopped {leftover} leftover student app(s)."
+            )
+        _set_active_registry(None)
+        _restore_grade_abort_handlers(previous_handlers)
 
 
 
@@ -2278,4 +2580,3 @@ def nv_grade_check(
             f"Grade run finished with {summary['counts']['failed']} failure(s). "
             f"See per-student handin/handback output.log above."
         )
-

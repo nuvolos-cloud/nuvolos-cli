@@ -347,13 +347,21 @@ def start_app(
 
 
 def wait_for_app_running(
-    org_slug: str, space_slug: str, instance_slug: str, app_slug: str
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    app_slug: str,
+    should_abort=None,
 ):
     running = False
     start = datetime.utcnow()
     stopped_timeout_secs = 30
     starting_timeout_secs = int(from_variable("APP_START_TIMEOUT_SECS", 600))
     while not running:
+        if should_abort is not None and should_abort():
+            raise KeyboardInterrupt(
+                f"aborted while waiting for app [{app_slug}] on [{instance_slug}]"
+            )
         workloads = list_all_running_workloads_for_app(
             org_slug=org_slug,
             space_slug=space_slug,
