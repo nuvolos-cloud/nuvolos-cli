@@ -66,7 +66,7 @@ class _StartedAppRegistry:
     """Thread-safe set of student apps this grade run has started."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._apps: dict[tuple[str, str, str, str], bool] = {}
         self._aborted = threading.Event()
 
@@ -75,7 +75,25 @@ class _StartedAppRegistry:
         return self._aborted.is_set()
 
     def request_abort(self) -> None:
-        self._aborted.set()
+        with self._lock:
+            self._aborted.set()
+
+    def start_app_if_active(
+        self, org_slug: str, space_slug: str, instance_slug: str, app_slug: str
+    ) -> bool:
+        key = (org_slug, space_slug, instance_slug, app_slug)
+        with self._lock:
+            if self._aborted.is_set():
+                return False
+            self._apps[key] = True
+            start_app(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                app_slug=app_slug,
+                node_pool=None,
+            )
+            return True
 
     def add(
         self, org_slug: str, space_slug: str, instance_slug: str, app_slug: str
@@ -111,13 +129,12 @@ class _StartedAppRegistry:
                     app_slug=app_slug,
                 )
                 stopped += 1
+                self.remove(org_slug, space_slug, instance_slug, app_slug)
             except Exception as exc:
                 clog.error(
                     f"[abort-cleanup] failed to stop app [{app_slug}] on "
                     f"[{instance_slug}]: {exc}"
                 )
-            finally:
-                self.remove(org_slug, space_slug, instance_slug, app_slug)
         return stopped
 
 
@@ -1692,14 +1709,20 @@ def test_one_student(
         )
         clog.info(f"[{instance_slug}] starting app [{app_slug}] (1/5).")
         if registry is not None:
-            registry.add(org_slug, space_slug, instance_slug, app_slug)
-        start_app(
-            org_slug=org_slug,
-            space_slug=space_slug,
-            instance_slug=instance_slug,
-            app_slug=app_slug,
-            node_pool=None,
-        )
+            if not registry.start_app_if_active(
+                org_slug, space_slug, instance_slug, app_slug
+            ):
+                raise KeyboardInterrupt(
+                    f"grade aborted before starting [{instance_slug}]"
+                )
+        else:
+            start_app(
+                org_slug=org_slug,
+                space_slug=space_slug,
+                instance_slug=instance_slug,
+                app_slug=app_slug,
+                node_pool=None,
+            )
         started = True
         click.echo(f">>> [{instance_slug}] waiting until app is RUNNING…")
         wait_for_app_running(
@@ -1795,11 +1818,8 @@ def test_one_student(
             record["stopped"] = ok
             if not ok:
                 record["stop_error"] = record.get("stop_error") or "stop_app failed"
-            if registry is not None:
+            if registry is not None and ok:
                 registry.remove(org_slug, space_slug, instance_slug, app_slug)
-        elif registry is not None:
-            # Registered but start_app never completed successfully.
-            registry.remove(org_slug, space_slug, instance_slug, app_slug)
         record["finished_at"] = _utc_now_iso()
         clog.info(
             f"[{instance_slug}] finished: status={record['status']}, "
@@ -2560,4 +2580,3 @@ def nv_grade_check(
             f"Grade run finished with {summary['counts']['failed']} failure(s). "
             f"See per-student handin/handback output.log above."
         )
-

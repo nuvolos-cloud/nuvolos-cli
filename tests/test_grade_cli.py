@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -486,6 +487,27 @@ def test_started_app_registry_stop_all(monkeypatch):
     assert registry.snapshot() == []
 
 
+def test_started_app_registry_retries_failed_stop(monkeypatch):
+    from nuvolos_cli import grade as grade_mod
+
+    attempts = []
+
+    def fake_stop(**kwargs):
+        attempts.append(kwargs["instance_slug"])
+        if len(attempts) == 1:
+            raise RuntimeError("temporary failure")
+
+    monkeypatch.setattr(grade_mod, "stop_app", fake_stop)
+    registry = grade_mod._StartedAppRegistry()
+    registry.add("org1", "space1", "stu_a", "bot")
+
+    assert registry.stop_all() == 0
+    assert registry.snapshot() == [("org1", "space1", "stu_a", "bot")]
+    assert registry.stop_all() == 1
+    assert registry.snapshot() == []
+    assert attempts == ["stu_a", "stu_a"]
+
+
 def test_test_one_student_stops_app_on_abort(monkeypatch):
     """Ctrl+C mid-wait must still stop the student app (finally + registry)."""
     from nuvolos_cli import grade as grade_mod
@@ -667,6 +689,114 @@ def test_run_grade_check_aborts_stops_started_apps(monkeypatch, tmp_path):
     # pre-start cleanup + finally stop (and possibly orchestrator sweep)
     assert stops.count("stu_a") >= 1
     assert grade_mod._get_active_registry() is None
+
+
+def test_parallel_abort_prevents_worker_start_after_cleanup(monkeypatch, tmp_path):
+    from click import ClickException
+    from nuvolos_cli import grade as grade_mod
+
+    manifest_path = tmp_path / "nvcollect_manifest.json"
+    work = tmp_path / "work"
+    work.mkdir()
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "src": f"/files/assignments-review/handin/{slug}/asg/ts/",
+                        "target": str(tmp_path / slug),
+                    }
+                    for slug in ("stu_a", "stu_b")
+                ]
+            }
+        )
+    )
+
+    lookup_started = threading.Event()
+    release_lookup = threading.Event()
+    cleanup_finished = threading.Event()
+    worker_finished = threading.Event()
+    starts = []
+
+    def fake_files_path(path):
+        p = Path(path).expanduser()
+        if not p.is_absolute():
+            p = work / p
+        return str(p)
+
+    def fake_workloads(**kwargs):
+        if kwargs["instance_slug"] == "stu_b":
+            lookup_started.set()
+            assert release_lookup.wait(5)
+        return []
+
+    def fake_start(**kwargs):
+        starts.append(kwargs["instance_slug"])
+
+    def fake_wait(**kwargs):
+        if kwargs["instance_slug"] == "stu_a":
+            assert lookup_started.wait(5)
+            raise KeyboardInterrupt("abort after first start")
+
+    original_set_registry = grade_mod._set_active_registry
+
+    def track_registry_clear(registry):
+        original_set_registry(registry)
+        if registry is None:
+            cleanup_finished.set()
+
+    original_test_one_student = grade_mod.test_one_student
+
+    def track_worker_completion(**kwargs):
+        try:
+            return original_test_one_student(**kwargs)
+        finally:
+            if kwargs["instance_slug"] == "stu_b":
+                worker_finished.set()
+
+    monkeypatch.setattr(grade_mod, "_set_active_registry", track_registry_clear)
+    monkeypatch.setattr(grade_mod, "test_one_student", track_worker_completion)
+    monkeypatch.setattr(grade_mod, "start_app", fake_start)
+    monkeypatch.setattr(grade_mod, "stop_app", lambda **kwargs: None)
+    monkeypatch.setattr(grade_mod, "wait_for_app_running", fake_wait)
+    monkeypatch.setattr(grade_mod, "list_apps", lambda **kwargs: [{"slug": "bot"}])
+    monkeypatch.setattr(
+        grade_mod, "list_all_running_workloads_for_app", fake_workloads
+    )
+    monkeypatch.setattr(
+        grade_mod,
+        "list_instances",
+        lambda **kwargs: [
+            Instance(slug="stu_a", name="a@ex.com"),
+            Instance(slug="stu_b", name="b@ex.com"),
+        ],
+    )
+    monkeypatch.setattr(grade_mod, "list_space_members", lambda **kwargs: [])
+    monkeypatch.setattr(grade_mod, "_as_files_abs_path", fake_files_path)
+    monkeypatch.setattr(grade_mod, "DEFAULT_GRADE_WORK_ROOT", str(work))
+    monkeypatch.setattr(grade_mod, "_install_grade_abort_handlers", lambda reg: {})
+    monkeypatch.setattr(grade_mod, "_restore_grade_abort_handlers", lambda prev: None)
+
+    try:
+        with pytest.raises(ClickException, match="Grade run aborted"):
+            grade_mod.run_grade_check(
+                org_slug="org1",
+                space_slug="space1",
+                app_slug="bot",
+                command="python bot.py",
+                skip_collect=True,
+                manifest_path=str(manifest_path),
+                pull_logs=False,
+                continue_on_error=True,
+                parallel=2,
+            )
+    finally:
+        cleaned = cleanup_finished.wait(5)
+        release_lookup.set()
+
+    assert cleaned
+    assert worker_finished.wait(5)
+    assert starts == ["stu_a"]
 
 
 def test_wait_loop_raises_when_abort_requested(monkeypatch):
