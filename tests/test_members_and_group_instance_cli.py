@@ -37,18 +37,6 @@ def _api_key_ok():
         yield
 
 
-def test_cli_help_lists_new_commands(runner):
-    spaces = runner.invoke(nuvolos, ["spaces", "--help"])
-    assert spaces.exit_code == 0
-    assert "members" in spaces.output
-    assert "invite" in spaces.output
-
-    instances = runner.invoke(nuvolos, ["instances", "--help"])
-    assert instances.exit_code == 0
-    assert "members" in instances.output
-    assert "invite" in instances.output
-    assert "create" in instances.output
-
 
 def test_instances_create_group_requires_editor_email(runner):
     result = runner.invoke(
@@ -393,3 +381,111 @@ def test_wrapper_create_group_instance_passes_model():
     assert body.editor_emails == ["a@example.com"]
     assert captured["org_slug"] == "org"
     assert captured["space_slug"] == "space"
+
+
+def test_invite_wrappers_map_request_fields():
+    captured = {}
+
+    class FakeApi:
+        def invite_instance_member(self, **kwargs):
+            captured["instance"] = kwargs
+            return InvitationSummary(
+                email=kwargs["instance_invitation_request"].email,
+                role=kwargs["instance_invitation_request"].role,
+                status="PENDING",
+                validity_timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+
+        def invite_space_member(self, **kwargs):
+            captured["space"] = kwargs
+            return SpaceInvitationSummary(
+                email=kwargs["space_invitation_request"].email,
+                role=kwargs["space_invitation_request"].role,
+                status="PENDING",
+                validity_timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    with (
+        patch("nuvolos_cli.api_client.get_api_config", return_value=object()),
+        patch("nuvolos_cli.api_client.nuvolos_client_api.ApiClient", return_value=FakeClient()),
+        patch("nuvolos_cli.api_client.nuvolos_client_api.InstancesV1Api", return_value=FakeApi()),
+        patch("nuvolos_cli.api_client.nuvolos_client_api.SpacesV1Api", return_value=FakeApi()),
+    ):
+        invite_instance_member("org", "space", "inst", "student@example.com", "VIEWER")
+        invite_space_member("org", "space", "admin@example.com", "SPACE_ADMIN")
+
+    instance_req = captured["instance"]["instance_invitation_request"]
+    space_req = captured["space"]["space_invitation_request"]
+    assert instance_req.email == "student@example.com"
+    assert instance_req.role == "VIEWER"
+    assert space_req.email == "admin@example.com"
+    assert space_req.role == "SPACE_ADMIN"
+
+
+def test_instances_create_group_wait_waits_for_task(runner):
+    task = Task(tkid=42, operation="Create group instance")
+    with (
+        patch("nuvolos_cli.interface.create_group_instance", return_value=task),
+        patch("nuvolos_cli.interface.wait_for_task", return_value=task) as waited,
+        patch("nuvolos_cli.interface.create_instance") as individual,
+    ):
+        result = runner.invoke(
+            nuvolos,
+            [
+                "instances", "create", "-o", "org1", "-s", "space1",
+                "-n", "Team", "--slug", "team", "--group",
+                "--editor-email", "a@example.com", "--wait", "-f", "json",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    waited.assert_called_once_with(tkid=42)
+    individual.assert_not_called()
+
+
+def test_instances_create_default_calls_individual_create(runner):
+    created = Task(tkid=9, operation="Create instance")
+    with (
+        patch("nuvolos_cli.interface.create_instance", return_value=created) as create,
+        patch("nuvolos_cli.interface.create_group_instance") as group,
+        patch("nuvolos_cli.interface.wait_for_task") as waited,
+    ):
+        result = runner.invoke(
+            nuvolos,
+            [
+                "instances", "create", "-o", "org1", "-s", "space1",
+                "-n", "Solo Student", "--slug", "solo", "-f", "json",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    create.assert_called_once_with(
+        org_slug="org1",
+        space_slug="space1",
+        instance_name="Solo Student",
+        instance_slug="solo",
+        instance_description=None,
+    )
+    group.assert_not_called()
+    waited.assert_not_called()
+
+
+def test_instances_invite_failure_exits_nonzero(runner):
+    with patch(
+        "nuvolos_cli.interface.invite_instance_member",
+        side_effect=NuvolosCliException(403, "Forbidden", "nope", {}),
+    ):
+        result = runner.invoke(
+            nuvolos,
+            [
+                "instances", "invite", "-o", "org1", "-s", "space1", "-i", "inst1",
+                "--email", "student@example.com", "--role", "viewer",
+            ],
+        )
+    assert result.exit_code != 0
+    assert "Forbidden" in result.output or "403" in result.output

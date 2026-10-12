@@ -71,10 +71,12 @@ nuvolos grade resolve-manifest \
 `-i <instance_slug>` to filter one student.
 
 The table columns are `instance_slug`, `email`, `name`, `role`, `in_space`,
-`target`, and `in_app_target ({target})`. Email and role come from the
-Client API space-members endpoint when available (fallback: instance display
-name). Fix any `in_space = NO` rows (missing instance or API key without
-access) before a full check, or pass `--skip-missing-instances` on `check`.
+`target`, and `in_app_target ({target})`. Email is taken from instance
+metadata first (display name / owner fields), then from the Client API
+space-members endpoint when available. Role comes only from space members
+(left blank if that lookup fails). Fix any `in_space = NO` rows (missing
+instance or API key without access) before a full check, or pass
+`--skip-missing-instances` on `check`.
 `in_app_target` is empty when the manifest item's handin `src` can't be
 mapped under `/assignments/handin/<instance_slug>/...` — check that student's
 `src` before relying on `{target}` in `-c`.
