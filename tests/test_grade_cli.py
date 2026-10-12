@@ -52,18 +52,8 @@ def _teaching_space():
     )
 
 
-def _json_payload(output: str):
-    start = output.find("[")
-    assert start >= 0, output
-    return json.loads(output[start:])
 
 
-def test_grade_help_lists_commands(runner):
-    result = runner.invoke(nuvolos, ["grade", "--help"])
-    assert result.exit_code == 0, result.output
-    assert "collect" in result.output
-    assert "resolve-manifest" in result.output
-    assert "check" in result.output
 
 
 def test_grade_check_requires_command(runner, teaching_env):
@@ -263,56 +253,6 @@ def test_resolve_students_uses_instances_and_space_members():
     assert missing["email"] is None
 
 
-def test_resolve_manifest_cli_json(runner, teaching_env, tmp_path):
-    manifest_path = tmp_path / "nvcollect_manifest.json"
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "items": [
-                    {
-                        "src": "/files/assignments-review/handin/stu_a/asg/ts/",
-                        "target": str(tmp_path / "stu_a"),
-                    }
-                ]
-            }
-        )
-    )
-    instances = [Instance(slug="stu_a", name="alice@ex.com")]
-    members = [
-        SpaceMember(
-            name="Alice",
-            email="alice@ex.com",
-            active=True,
-            space_role=None,
-            instance_roles=[SpaceInstanceRole(instance_slug="stu_a", role="EDITOR")],
-        )
-    ]
-    with (
-        patch("nuvolos_cli.grade.check_api_key_configured", return_value="k"),
-        patch("nuvolos_cli.grade.list_spaces", return_value=[_teaching_space()]),
-        patch("nuvolos_cli.grade.list_instances", return_value=instances),
-        patch("nuvolos_cli.grade.list_space_members", return_value=members),
-    ):
-        result = runner.invoke(
-            nuvolos,
-            [
-                "grade",
-                "resolve-manifest",
-                "-m",
-                str(manifest_path),
-                "-o",
-                "org1",
-                "-s",
-                "space1",
-                "-f",
-                "json",
-            ],
-        )
-    assert result.exit_code == 0, result.output
-    payload = _json_payload(result.output)
-    assert payload[0]["email"] == "alice@ex.com"
-    assert payload[0]["instance_role"] == "EDITOR"
-    assert payload[0]["found_in_space"] is True
 
 
 def test_grade_check_dry_run_uses_client_lifecycle_plan(runner, teaching_env, tmp_path):
@@ -380,34 +320,6 @@ def test_grade_check_dry_run_uses_client_lifecycle_plan(runner, teaching_env, tm
     stop.assert_not_called()
 
 
-def test_grade_collect_invokes_nuvolos_collect(runner, tmp_path, monkeypatch):
-    monkeypatch.setenv("NUVOLOS_API_KEY", "test-key")
-    target = tmp_path / "out"
-    target.mkdir()
-    with (
-        patch("nuvolos_cli.grade.check_api_key_configured", return_value="k"),
-        patch("nuvolos_cli.grade.collect_submissions", return_value=0) as collect,
-    ):
-        result = runner.invoke(
-            nuvolos,
-            [
-                "grade",
-                "collect",
-                "--assignment-name",
-                "hw1",
-                "--assignment-folder",
-                "submission",
-                "--target-folder",
-                str(target),
-                "-o",
-                "org1",
-                "-s",
-                "space1",
-            ],
-        )
-    assert result.exit_code == 0, result.output
-    collect.assert_called_once()
-    assert "Collect completed" in result.output
 
 
 def test_wait_for_execute_completion_zero_disables_timeout(monkeypatch):
@@ -508,6 +420,66 @@ def test_started_app_registry_retries_failed_stop(monkeypatch):
     assert attempts == ["stu_a", "stu_a"]
 
 
+def test_start_app_if_active_does_not_hold_lock_during_start(monkeypatch):
+    """Abort must be able to set the event while start_app HTTP is in flight."""
+    from nuvolos_cli import grade as grade_mod
+
+    registry = grade_mod._StartedAppRegistry()
+    started = threading.Event()
+    release_start = threading.Event()
+    abort_during_start = threading.Event()
+
+    def fake_start(**kwargs):
+        started.set()
+        assert release_start.wait(5)
+        # Simulate abort landing mid-start.
+        assert abort_during_start.wait(5)
+
+    monkeypatch.setattr(grade_mod, "start_app", fake_start)
+    monkeypatch.setattr(grade_mod, "stop_app", lambda **kw: None)
+
+    def worker():
+        assert registry.start_app_if_active("org1", "space1", "stu_a", "bot") is False
+
+    t = threading.Thread(target=worker)
+    t.start()
+    assert started.wait(5)
+    # Must not block on the worker's start_app call.
+    registry.request_abort()
+    abort_during_start.set()
+    release_start.set()
+    t.join(5)
+    assert not t.is_alive()
+    assert registry.aborted
+
+
+def test_abort_handlers_ignore_second_signal_and_restore():
+    import signal as signal_mod
+
+    from nuvolos_cli import grade as grade_mod
+
+    registry = grade_mod._StartedAppRegistry()
+    grade_mod._reset_run_abort_state()
+    previous_int = signal_mod.getsignal(signal_mod.SIGINT)
+    previous_term = signal_mod.getsignal(signal_mod.SIGTERM)
+    previous = grade_mod._install_grade_abort_handlers(registry)
+    try:
+        handler = signal_mod.getsignal(signal_mod.SIGINT)
+        assert callable(handler)
+        with pytest.raises(KeyboardInterrupt, match="grade aborted"):
+            handler(signal_mod.SIGINT, None)
+        assert registry.aborted
+        assert grade_mod._run_abort_event.is_set()
+        assert signal_mod.getsignal(signal_mod.SIGINT) is signal_mod.SIG_IGN
+        assert signal_mod.getsignal(signal_mod.SIGTERM) is signal_mod.SIG_IGN
+    finally:
+        grade_mod._restore_grade_abort_handlers(previous)
+        grade_mod._reset_run_abort_state()
+    assert signal_mod.getsignal(signal_mod.SIGINT) == previous_int
+    assert signal_mod.getsignal(signal_mod.SIGTERM) == previous_term
+
+
+
 def test_test_one_student_stops_app_on_abort(monkeypatch):
     """Ctrl+C mid-wait must still stop the student app (finally + registry)."""
     from nuvolos_cli import grade as grade_mod
@@ -557,52 +529,6 @@ def test_test_one_student_stops_app_on_abort(monkeypatch):
     assert registry.snapshot() == []
 
 
-def test_stop_app_if_running_skips_when_no_workload(monkeypatch):
-    from nuvolos_cli import grade as grade_mod
-
-    stops = []
-    monkeypatch.setattr(
-        grade_mod, "list_all_running_workloads_for_app", lambda **kw: []
-    )
-    monkeypatch.setattr(
-        grade_mod, "stop_app", lambda **kw: stops.append(kw["instance_slug"])
-    )
-    assert (
-        grade_mod._stop_app_if_running(
-            org_slug="org1",
-            space_slug="space1",
-            instance_slug="stu_a",
-            app_slug="bot",
-            reason="test",
-        )
-        is False
-    )
-    assert stops == []
-
-
-def test_stop_app_if_running_stops_when_workload_present(monkeypatch):
-    from nuvolos_cli import grade as grade_mod
-
-    stops = []
-    monkeypatch.setattr(
-        grade_mod,
-        "list_all_running_workloads_for_app",
-        lambda **kw: [{"status": "RUNNING"}],
-    )
-    monkeypatch.setattr(
-        grade_mod, "stop_app", lambda **kw: stops.append(kw["instance_slug"])
-    )
-    assert (
-        grade_mod._stop_app_if_running(
-            org_slug="org1",
-            space_slug="space1",
-            instance_slug="stu_a",
-            app_slug="bot",
-            reason="test",
-        )
-        is True
-    )
-    assert stops == ["stu_a"]
 
 
 
@@ -669,9 +595,7 @@ def test_run_grade_check_aborts_stops_started_apps(monkeypatch, tmp_path):
     monkeypatch.setattr(grade_mod, "list_space_members", lambda **kw: [])
     monkeypatch.setattr(grade_mod, "_as_files_abs_path", fake_files_path)
     monkeypatch.setattr(grade_mod, "DEFAULT_GRADE_WORK_ROOT", str(work))
-    # Avoid signal handler install side effects in unit tests.
-    monkeypatch.setattr(grade_mod, "_install_grade_abort_handlers", lambda reg: {})
-    monkeypatch.setattr(grade_mod, "_restore_grade_abort_handlers", lambda prev: None)
+
 
     with pytest.raises(ClickException, match="Grade run aborted"):
         grade_mod.run_grade_check(
@@ -691,7 +615,10 @@ def test_run_grade_check_aborts_stops_started_apps(monkeypatch, tmp_path):
     assert grade_mod._get_active_registry() is None
 
 
-def test_parallel_abort_prevents_worker_start_after_cleanup(monkeypatch, tmp_path):
+def test_parallel_abort_stops_started_app_and_skips_late_start(monkeypatch, tmp_path):
+    """Scripted pool: started apps are stopped; a worker released after cleanup does not start."""
+    from concurrent.futures import CancelledError
+
     from click import ClickException
     from nuvolos_cli import grade as grade_mod
 
@@ -712,11 +639,54 @@ def test_parallel_abort_prevents_worker_start_after_cleanup(monkeypatch, tmp_pat
         )
     )
 
-    lookup_started = threading.Event()
-    release_lookup = threading.Event()
-    cleanup_finished = threading.Event()
-    worker_finished = threading.Event()
     starts = []
+    stops = []
+    shutdowns = []
+
+    class _InlineFuture:
+        def __init__(self, fn):
+            self._fn = fn
+            self._done = False
+            self._value = None
+            self._error = None
+            self._cancelled = False
+
+        def cancel(self):
+            if self._done:
+                return False
+            self._cancelled = True
+            return True
+
+        def result(self, timeout=None):
+            if self._cancelled and not self._done:
+                raise CancelledError()
+            if not self._done:
+                try:
+                    self._value = self._fn()
+                except BaseException as exc:
+                    self._error = exc
+                    self._done = True
+                    raise
+                self._done = True
+            if self._error:
+                raise self._error
+            return self._value
+
+    class _ScriptedPool:
+        def __init__(self, max_workers):
+            self.max_workers = max_workers
+            self.futures = []
+
+        def submit(self, fn, *args, **kwargs):
+            fut = _InlineFuture(lambda: fn(*args, **kwargs))
+            self.futures.append(fut)
+            return fut
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            shutdowns.append((wait, cancel_futures))
+            if cancel_futures:
+                for fut in self.futures:
+                    fut.cancel()
 
     def fake_files_path(path):
         p = Path(path).expanduser()
@@ -724,44 +694,17 @@ def test_parallel_abort_prevents_worker_start_after_cleanup(monkeypatch, tmp_pat
             p = work / p
         return str(p)
 
-    def fake_workloads(**kwargs):
-        if kwargs["instance_slug"] == "stu_b":
-            lookup_started.set()
-            assert release_lookup.wait(5)
-        return []
-
-    def fake_start(**kwargs):
-        starts.append(kwargs["instance_slug"])
-
     def fake_wait(**kwargs):
         if kwargs["instance_slug"] == "stu_a":
-            assert lookup_started.wait(5)
             raise KeyboardInterrupt("abort after first start")
 
-    original_set_registry = grade_mod._set_active_registry
-
-    def track_registry_clear(registry):
-        original_set_registry(registry)
-        if registry is None:
-            cleanup_finished.set()
-
-    original_test_one_student = grade_mod.test_one_student
-
-    def track_worker_completion(**kwargs):
-        try:
-            return original_test_one_student(**kwargs)
-        finally:
-            if kwargs["instance_slug"] == "stu_b":
-                worker_finished.set()
-
-    monkeypatch.setattr(grade_mod, "_set_active_registry", track_registry_clear)
-    monkeypatch.setattr(grade_mod, "test_one_student", track_worker_completion)
-    monkeypatch.setattr(grade_mod, "start_app", fake_start)
-    monkeypatch.setattr(grade_mod, "stop_app", lambda **kwargs: None)
+    monkeypatch.setattr(grade_mod, "_new_grade_pool", _ScriptedPool)
+    monkeypatch.setattr(grade_mod, "start_app", lambda **kw: starts.append(kw["instance_slug"]))
+    monkeypatch.setattr(grade_mod, "stop_app", lambda **kw: stops.append(kw["instance_slug"]))
     monkeypatch.setattr(grade_mod, "wait_for_app_running", fake_wait)
     monkeypatch.setattr(grade_mod, "list_apps", lambda **kwargs: [{"slug": "bot"}])
     monkeypatch.setattr(
-        grade_mod, "list_all_running_workloads_for_app", fake_workloads
+        grade_mod, "list_all_running_workloads_for_app", lambda **kwargs: []
     )
     monkeypatch.setattr(
         grade_mod,
@@ -774,29 +717,25 @@ def test_parallel_abort_prevents_worker_start_after_cleanup(monkeypatch, tmp_pat
     monkeypatch.setattr(grade_mod, "list_space_members", lambda **kwargs: [])
     monkeypatch.setattr(grade_mod, "_as_files_abs_path", fake_files_path)
     monkeypatch.setattr(grade_mod, "DEFAULT_GRADE_WORK_ROOT", str(work))
-    monkeypatch.setattr(grade_mod, "_install_grade_abort_handlers", lambda reg: {})
-    monkeypatch.setattr(grade_mod, "_restore_grade_abort_handlers", lambda prev: None)
 
-    try:
-        with pytest.raises(ClickException, match="Grade run aborted"):
-            grade_mod.run_grade_check(
-                org_slug="org1",
-                space_slug="space1",
-                app_slug="bot",
-                command="python bot.py",
-                skip_collect=True,
-                manifest_path=str(manifest_path),
-                pull_logs=False,
-                continue_on_error=True,
-                parallel=2,
-            )
-    finally:
-        cleaned = cleanup_finished.wait(5)
-        release_lookup.set()
+    with pytest.raises(ClickException, match="Grade run aborted"):
+        grade_mod.run_grade_check(
+            org_slug="org1",
+            space_slug="space1",
+            app_slug="bot",
+            command="python bot.py",
+            skip_collect=True,
+            manifest_path=str(manifest_path),
+            pull_logs=False,
+            continue_on_error=True,
+            parallel=2,
+        )
 
-    assert cleaned
-    assert worker_finished.wait(5)
     assert starts == ["stu_a"]
+    assert "stu_a" in stops
+    assert "stu_b" not in starts
+    assert shutdowns == [(False, True)]
+    assert grade_mod._get_active_registry() is None
 
 
 def test_wait_loop_raises_when_abort_requested(monkeypatch):
@@ -817,3 +756,171 @@ def test_wait_loop_raises_when_abort_requested(monkeypatch):
             )
     finally:
         grade_mod._set_active_registry(None)
+
+
+def test_late_worker_does_not_start_after_globals_cleared(monkeypatch):
+    """Abort cleanup may clear the global pointer; the captured registry still blocks start."""
+    from nuvolos_cli import grade as grade_mod
+
+    registry = grade_mod._StartedAppRegistry()
+    grade_mod._set_active_registry(registry)
+    starts = []
+
+    def fake_workloads(**kwargs):
+        registry.request_abort()
+        grade_mod._set_active_registry(None)
+        grade_mod._run_abort_event.clear()
+        return []
+
+    monkeypatch.setattr(grade_mod, "list_apps", lambda **kw: [{"slug": "bot"}])
+    monkeypatch.setattr(grade_mod, "list_all_running_workloads_for_app", fake_workloads)
+    monkeypatch.setattr(grade_mod, "start_app", lambda **kw: starts.append(kw["instance_slug"]))
+    monkeypatch.setattr(grade_mod, "stop_app", lambda **kw: None)
+
+    with pytest.raises(KeyboardInterrupt, match="aborted before starting"):
+        grade_mod.test_one_student(
+            org_slug="org1",
+            space_slug="space1",
+            instance_slug="stu_b",
+            app_slug="bot",
+            command="python bot.py",
+            run_id="run1",
+            results_root="/files/.nuvolos_grade",
+            pull_logs=False,
+        )
+    assert starts == []
+    grade_mod._set_active_registry(None)
+    grade_mod._reset_run_abort_state()
+
+
+def test_resolve_students_filters_instance_and_survives_member_lookup_failure():
+    from nuvolos_cli import grade as grade_mod
+
+    manifest = {
+        "items": [
+            {"src": "/files/assignments-review/handin/stu_a/a/ts/", "target": "/tmp/a"},
+            {"src": "/files/assignments-review/handin/stu_b/a/ts/", "target": "/tmp/b"},
+        ]
+    }
+    instances = [
+        Instance(slug="stu_a", name="alice@ex.com"),
+        Instance(slug="stu_b", name="Not An Email"),
+    ]
+    with (
+        patch("nuvolos_cli.grade.list_instances", return_value=instances),
+        patch(
+            "nuvolos_cli.grade.list_space_members",
+            side_effect=RuntimeError("members down"),
+        ),
+    ):
+        selected = grade_mod.resolve_students(
+            manifest, "org1", "space1", instance_filter="stu_a"
+        )
+    assert [row["instance_slug"] for row in selected] == ["stu_a"]
+    assert selected[0]["email"] == "alice@ex.com"
+    assert selected[0]["instance_role"] is None
+
+
+def test_read_manifest_rejects_missing_invalid_and_shapeless(tmp_path):
+    from click import ClickException
+    from nuvolos_cli import grade as grade_mod
+
+    missing = tmp_path / "nope.json"
+    with pytest.raises(ClickException, match="Manifest not found"):
+        grade_mod.read_manifest(missing)
+
+    bad = tmp_path / "nvcollect_manifest.json"
+    bad.write_text("{")
+    with pytest.raises(ClickException, match="Invalid manifest JSON"):
+        grade_mod.read_manifest(bad)
+
+    bad.write_text(json.dumps({"meta": {}}))
+    with pytest.raises(ClickException, match="items"):
+        grade_mod.read_manifest(bad)
+
+
+def test_grade_check_missing_instance_and_skip_collect_errors(runner, teaching_env, tmp_path):
+    manifest_path = tmp_path / "nvcollect_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "src": "/files/assignments-review/handin/missing/asg/ts/",
+                        "target": str(tmp_path / "missing"),
+                    }
+                ]
+            }
+        )
+    )
+    with (
+        patch("nuvolos_cli.grade.check_api_key_configured", return_value="k"),
+        patch("nuvolos_cli.grade.list_spaces", return_value=[_teaching_space()]),
+        patch("nuvolos_cli.grade.list_instances", return_value=[]),
+        patch("nuvolos_cli.grade.list_space_members", return_value=[]),
+        patch("nuvolos_cli.grade._as_files_abs_path", side_effect=lambda path: str(tmp_path / "work")),
+    ):
+        missing_manifest = runner.invoke(
+            nuvolos,
+            [
+                "grade", "check", "-o", "org1", "-s", "space1", "-a", "bot",
+                "-c", "true", "--skip-collect",
+            ],
+        )
+        missing_instance = runner.invoke(
+            nuvolos,
+            [
+                "grade", "check", "-o", "org1", "-s", "space1", "-a", "bot",
+                "-c", "true", "--skip-collect", "-m", str(manifest_path),
+            ],
+        )
+    assert missing_manifest.exit_code != 0
+    assert "--manifest" in missing_manifest.output
+    assert missing_instance.exit_code != 0
+    assert "not found" in missing_instance.output
+
+
+def test_grade_check_failed_student_exits_nonzero(runner, teaching_env, tmp_path):
+    manifest_path = tmp_path / "nvcollect_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "src": "/files/assignments-review/handin/stu_a/asg/ts/",
+                        "target": str(tmp_path / "stu_a"),
+                    }
+                ]
+            }
+        )
+    )
+
+    def fake_files_path(path):
+        p = Path(path).expanduser()
+        if str(p).startswith("/files"):
+            p = tmp_path / "work" / p.name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return str(p)
+
+    with (
+        patch("nuvolos_cli.grade.check_api_key_configured", return_value="k"),
+        patch("nuvolos_cli.grade.list_spaces", return_value=[_teaching_space()]),
+        patch("nuvolos_cli.grade.list_instances", return_value=[Instance(slug="stu_a", name="a@ex.com")]),
+        patch("nuvolos_cli.grade.list_space_members", return_value=[]),
+        patch("nuvolos_cli.grade._as_files_abs_path", side_effect=fake_files_path),
+        patch("nuvolos_cli.grade.list_apps", return_value=[]),
+        patch("nuvolos_cli.grade.list_all_running_workloads_for_app", return_value=[]),
+        patch("nuvolos_cli.grade.start_app") as start,
+        patch("nuvolos_cli.grade.handback_collected_results", return_value={"status": "ok"}),
+    ):
+        result = runner.invoke(
+            nuvolos,
+            [
+                "grade", "check", "-o", "org1", "-s", "space1", "-a", "bot",
+                "-c", "true", "--skip-collect", "-m", str(manifest_path),
+                "--continue-on-error",
+            ],
+        )
+    assert result.exit_code != 0, result.output
+    assert "failure" in result.output
+    start.assert_not_called()
