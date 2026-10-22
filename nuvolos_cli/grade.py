@@ -8,6 +8,7 @@ each selected student application.
 from __future__ import annotations
 
 import atexit
+import fcntl
 import json
 import os
 import signal
@@ -57,6 +58,7 @@ GRADE_ARTIFACTS_DIRNAME = "_grading"
 # Cross-process/cross-user FIFO: one ticket file per waiting grade job, under
 # the shared /files tree so every instructor's CLI sees the same queue.
 GRADE_QUEUE_DIRNAME = ".nuvolos_grade_queue"
+GRADE_QUEUE_ROOT = "/files"
 # A ticket older than this is treated as abandoned (crashed CLI, lost shell).
 GRADE_TICKET_STALE_SECS = 3600
 # How long a queued job waits for its turn before giving up (0 = forever).
@@ -306,13 +308,15 @@ class _FileTicketQueue:
         """Reserve this job's place in line; returns the ticket path."""
         queue_dir = self._queue_dir(key)
         queue_dir.mkdir(parents=True, exist_ok=True)
-        existing = self._live_tickets(queue_dir)
-        seq = (existing[-1][0] + 1) if existing else 0
-        while True:
-            ticket = queue_dir / f"{seq:012d}-{os.getpid()}-{uuid.uuid4().hex}.json"
+        lock_path = queue_dir / ".allocation.lock"
+        with lock_path.open("a", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
-                # Exclusive create: two CLIs racing on the same seq cannot
-                # both win, the loser just tries the next number.
+                existing = self._live_tickets(queue_dir)
+                seq = (existing[-1][0] + 1) if existing else 0
+                ticket = queue_dir / (
+                    f"{seq:012d}-{os.getpid()}-{uuid.uuid4().hex}.json"
+                )
                 with ticket.open("x", encoding="utf-8") as fh:
                     json.dump(
                         {
@@ -325,10 +329,9 @@ class _FileTicketQueue:
                         },
                         fh,
                     )
-            except FileExistsError:
-                seq += 1
-                continue
-            return ticket
+                return ticket
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def position(self, key: tuple[str, str, str, str], ticket: Path) -> int:
         """0 when this ticket owns the app, else how many jobs are ahead."""
@@ -579,8 +582,8 @@ def _wait_until_app_free(
 
     Covers workloads this process does not own: a job from another instructor's
     CLI that is mid-run, a student-started app, or a leftover from an aborted
-    run. A failed workload lookup is treated as "free" so a flaky API call
-    cannot stall grading.
+    run. If workload state cannot be determined, fail instead of admitting the
+    job while the app may still be busy.
     """
     deadline = None if timeout_secs is None else time.monotonic() + timeout_secs
     announced = False
@@ -597,6 +600,11 @@ def _wait_until_app_free(
             app_slug=app_slug,
             context="queue admission",
         )
+        if running is None:
+            raise RuntimeError(
+                f"could not determine workload state for app [{app_slug}] "
+                f"on [{instance_slug}]; refusing to start"
+            )
         if not running:
             if announced:
                 clog.info(f"[{instance_slug}] app [{app_slug}] is free; proceeding.")
@@ -2057,9 +2065,9 @@ def test_one_student(
     queue_key = (org_slug, space_slug, instance_slug, app_slug)
     queue_held = False
     file_ticket: Path | None = None
-    ticket_queue = (
-        _FileTicketQueue(results_root) if results_root is not None else None
-    )
+    ticket_queue = _FileTicketQueue(GRADE_QUEUE_ROOT)
+    ticket_heartbeat_stop = threading.Event()
+    ticket_heartbeat_thread: threading.Thread | None = None
     wait_budget = (
         None if not queue_timeout_secs else float(queue_timeout_secs)
     )
@@ -2116,18 +2124,31 @@ def test_one_student(
             return max(0.0, wait_budget - (time.monotonic() - queue_started))
 
         # Stage 2: FIFO across processes/users via ticket files on /files.
-        if ticket_queue is not None:
-            try:
-                file_ticket = ticket_queue.take_ticket(queue_key)
-            except OSError as exc:
-                # Shared tree not writable here (tests, restricted mount):
-                # stage 3 still serializes against other runs' workloads.
-                clog.warning(
-                    f"[{instance_slug}] shared grade queue unavailable "
-                    f"({exc}); relying on running-workload checks only."
+        try:
+            file_ticket = ticket_queue.take_ticket(queue_key)
+        except OSError as exc:
+            # Shared tree not writable here (tests, restricted mount):
+            # stage 3 still serializes against other runs' workloads.
+            clog.warning(
+                f"[{instance_slug}] shared grade queue unavailable "
+                f"({exc}); relying on running-workload checks only."
+            )
+            ticket_queue = None
+        if ticket_queue is not None and file_ticket is not None:
+
+            def _keep_ticket_alive() -> None:
+                interval = max(
+                    0.1, min(60.0, ticket_queue._stale_after_secs / 3)
                 )
-                ticket_queue = None
-                file_ticket = None
+                while not ticket_heartbeat_stop.wait(interval):
+                    ticket_queue.heartbeat(file_ticket)
+
+            ticket_heartbeat_thread = threading.Thread(
+                target=_keep_ticket_alive,
+                name=f"grade-ticket-{instance_slug}",
+                daemon=True,
+            )
+            ticket_heartbeat_thread.start()
         if ticket_queue is not None and file_ticket is not None:
             announced = False
             while True:
@@ -2296,6 +2317,9 @@ def test_one_student(
                 record["stop_error"] = record.get("stop_error") or "stop_app failed"
             if registry is not None and ok:
                 registry.remove(org_slug, space_slug, instance_slug, app_slug)
+        if ticket_heartbeat_thread is not None:
+            ticket_heartbeat_stop.set()
+            ticket_heartbeat_thread.join()
         if file_ticket is not None and ticket_queue is not None:
             ticket_queue.release(file_ticket)
         if queue_held:
