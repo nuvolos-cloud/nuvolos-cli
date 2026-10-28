@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -462,6 +463,19 @@ def test_wait_for_execute_completion_missing_sentinel_is_failure(monkeypatch):
     )
 
 
+def test_wrap_command_publishes_exit_sentinel_before_done_file():
+    from nuvolos_cli.grade import _wrap_command_with_done_file
+
+    command = _wrap_command_with_done_file(
+        "true",
+        done_file="/files/results/.cmd_done",
+        output_log="/files/results/output.log",
+    )
+    assert command.index(': > "$work/.cmd_exit.$ec"') < command.index(
+        'printf \'%s\' "$ec" > "$done_file"'
+    )
+
+
 def test_readiness_queue_backs_off_while_absent(monkeypatch):
     """Absent directories must widen the poll interval, present ones reset it."""
     from nuvolos_cli import grade as grade_mod
@@ -499,9 +513,75 @@ def test_is_not_found_error_detects_absence_shapes():
         status = 500
         body = '{"code": "space_rested"}'
 
+    class _UrlOnlyMatch(Exception):
+        status = 500
+        body = ""
+
+        def __str__(self):
+            return "request failed: /files/item_not_found"
+
+    class _AuthError(Exception):
+        status = 403
+        body = '{"code": "item_not_found"}'
+
     assert grade_mod._is_not_found_error(_Status("missing"))
     assert grade_mod._is_not_found_error(_LegacyFiveHundred("boom"))
     assert not grade_mod._is_not_found_error(_RealFailure("boom"))
+    assert not grade_mod._is_not_found_error(_UrlOnlyMatch("boom"))
+    assert not grade_mod._is_not_found_error(_AuthError("forbidden"))
+
+
+def test_readiness_queue_shares_listing_with_waiters(monkeypatch):
+    from nuvolos_cli import grade as grade_mod
+
+    queue = grade_mod._ReadinessQueue()
+    request_started = threading.Event()
+    release_request = threading.Event()
+    calls = []
+
+    def fake_list_files(**kwargs):
+        calls.append(kwargs)
+        request_started.set()
+        assert release_request.wait(timeout=2)
+        return [{"name": "ready-a"}, {"name": "ready-b"}]
+
+    monkeypatch.setattr(grade_mod, "list_files", fake_list_files)
+    results = {}
+
+    def wait_for(name):
+        results[name] = queue.wait_for(
+            org_slug="org1",
+            space_slug="space1",
+            instance_slug="stu_1",
+            dir_rel="work",
+            predicate=lambda entries: any(entry["name"] == name for entry in entries),
+            timeout_secs=2,
+            description=name,
+        )
+
+    first = threading.Thread(target=wait_for, args=("ready-a",))
+    second = threading.Thread(target=wait_for, args=("ready-b",))
+    first.start()
+    assert request_started.wait(timeout=2)
+    second.start()
+
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        with queue._condition:
+            if len(queue._waiters.get(("org1", "space1", "stu_1", "work"), {})) == 2:
+                break
+        threading.Event().wait(0.01)
+    else:
+        pytest.fail("second waiter did not register")
+
+    release_request.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert results == {"ready-a": True, "ready-b": True}
+    assert len(calls) == 1
 
 
 def test_started_app_registry_stop_all(monkeypatch):
@@ -633,11 +713,6 @@ def test_test_one_student_stops_app_on_abort(monkeypatch):
     monkeypatch.setattr(grade_mod, "start_app", fake_start)
     monkeypatch.setattr(grade_mod, "wait_for_app_running", fake_wait)
     monkeypatch.setattr(grade_mod, "list_apps", lambda **kw: [{"slug": "bot"}])
-    # No pre-existing workload → pre-start cleanup is a no-op.
-    monkeypatch.setattr(
-        grade_mod, "list_all_running_workloads_for_app", lambda **kw: []
-    )
-
     registry = grade_mod._StartedAppRegistry()
     grade_mod._set_active_registry(registry)
     try:
@@ -714,9 +789,6 @@ def test_run_grade_check_aborts_stops_started_apps(monkeypatch, tmp_path):
     monkeypatch.setattr(grade_mod, "start_app", fake_start)
     monkeypatch.setattr(grade_mod, "wait_for_app_running", fake_wait)
     monkeypatch.setattr(grade_mod, "list_apps", lambda **kw: [{"slug": "bot"}])
-    monkeypatch.setattr(
-        grade_mod, "list_all_running_workloads_for_app", lambda **kw: []
-    )
     monkeypatch.setattr(
         grade_mod,
         "list_instances",
@@ -837,9 +909,6 @@ def test_parallel_abort_stops_started_app_and_skips_late_start(monkeypatch, tmp_
     monkeypatch.setattr(grade_mod, "wait_for_app_running", fake_wait)
     monkeypatch.setattr(grade_mod, "list_apps", lambda **kwargs: [{"slug": "bot"}])
     monkeypatch.setattr(
-        grade_mod, "list_all_running_workloads_for_app", lambda **kwargs: []
-    )
-    monkeypatch.setattr(
         grade_mod,
         "list_instances",
         lambda **kwargs: [
@@ -899,14 +968,14 @@ def test_late_worker_does_not_start_after_globals_cleared(monkeypatch):
     grade_mod._set_active_registry(registry)
     starts = []
 
-    def fake_workloads(**kwargs):
+    def fake_get_active_registry():
         registry.request_abort()
         grade_mod._set_active_registry(None)
         grade_mod._run_abort_event.clear()
-        return []
+        return registry
 
     monkeypatch.setattr(grade_mod, "list_apps", lambda **kw: [{"slug": "bot"}])
-    monkeypatch.setattr(grade_mod, "list_all_running_workloads_for_app", fake_workloads)
+    monkeypatch.setattr(grade_mod, "_get_active_registry", fake_get_active_registry)
     monkeypatch.setattr(grade_mod, "start_app", lambda **kw: starts.append(kw["instance_slug"]))
     monkeypatch.setattr(grade_mod, "stop_app", lambda **kw: None)
 
@@ -1042,7 +1111,6 @@ def test_grade_check_failed_student_exits_nonzero(runner, teaching_env, tmp_path
         patch("nuvolos_cli.grade.list_space_members", return_value=[]),
         patch("nuvolos_cli.grade._as_files_abs_path", side_effect=fake_files_path),
         patch("nuvolos_cli.grade.list_apps", return_value=[]),
-        patch("nuvolos_cli.grade.list_all_running_workloads_for_app", return_value=[]),
         patch("nuvolos_cli.grade.start_app") as start,
         patch("nuvolos_cli.grade.handback_collected_results", return_value={"status": "ok"}),
     ):

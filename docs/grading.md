@@ -114,68 +114,13 @@ nuvolos grade check \
 
 Per student, `check` does:
 
-1. Queue for the student app until no other grade job holds it
-   (see [Queuing per student app](#queuing-per-student-app)).
-2. Start `-a` on the student instance (development snapshot).
-3. Wait until the app is `RUNNING`.
-4. Execute `-c` (with grade-owned stdout/stderr redirects and a completion
+1. Start `-a` on the student instance (development snapshot).
+2. Wait until the app is `RUNNING`.
+3. Execute `-c` (with grade-owned stdout/stderr redirects and a completion
    marker under `/files/grade_results/<run_id>/<instance_slug>/`).
-5. Optionally distribute logs to the instructor instance and copy them into
+4. Optionally distribute logs to the instructor instance and copy them into
    `--results-dir`.
-6. Stop the app.
-
-## Queuing per student app
-
-Only one grade job runs on a given `(org, space, instance, app)` at a time.
-A job that arrives while another holds the app **waits its turn** (FIFO) and
-then runs — it is not dropped, and no second workload is started, so two
-instructors triggering `grade check` together cannot double the resource
-usage on a student instance.
-
-Admission has three stages, each announced on the console:
-
-| Stage | Covers | Mechanism |
-|-------|--------|-----------|
-| Local queue | `--parallel N` workers, a manifest listing a student twice | In-memory FIFO per app key |
-| Shared queue | A second `grade check` from another shell or another instructor | Ticket files under `<staging-root>/.nuvolos_grade_queue/`, lowest sequence wins |
-| App free | Student-started apps, leftovers from an aborted run | Polls running workloads for the app until none remain |
-
-While queued, the student line shows the position:
-
-```
->>> [stu_a] queued for app [bot] (1 ahead from other runs); waiting…
->>> [stu_a] app [bot] busy (1 workload(s)); queued behind it…
->>> [stu_a] queue turn reached.
-```
-
-Admitted students report their wait in the summary
-(`queued : 182.0s waiting for the app`).
-
-### Queue wait limit
-
-`--queue-timeout N` bounds the wait (default `0` = wait indefinitely).
-A student still queued after *N* seconds is reported **failed** with
-`timed out … waiting in the queue`, never force-started. Use it when a run
-must not block behind a colleague's long validation:
-
-```
-nuvolos grade check --queue-timeout 1800 ...
-```
-
-### Stuck queues
-
-Ticket files are self-healing: an entry older than one hour (a crashed CLI,
-a closed shell) is pruned automatically and the next job proceeds. A leftover
-*workload* is not force-stopped — if an aborted run left an app up and nobody
-will clear it, stop it explicitly:
-
-```
-nuvolos apps stop -o <org> -s <space> -i <student_instance> -a <app_slug>
-```
-
-The shared queue needs a writable staging tree (`/files/.nuvolos_grade` by
-default). If tickets cannot be written, `check` logs a warning and falls back
-to the running-workload check, which still prevents concurrent starts.
+5. Stop the app.
 
 ## Command placeholders
 
@@ -225,7 +170,6 @@ Example combining `{target}` with the per-student slug for logging:
 | `-i` / `--instance` | Only this student instance slug |
 | `--parallel N` | Run up to *N* student checks concurrently (requires `--continue-on-error` for true parallelism; otherwise forced sequential so the run can stop on first failure) |
 | `--exec-timeout N` | Seconds to wait for the validation command to finish before giving up. `0` disables the timeout (wait indefinitely) — use when the command itself must stay up for a long external test run. Default: `GRADE_EXEC_TIMEOUT_SECS` env var, or `600` |
-| `--queue-timeout N` | Seconds to wait in the queue when another grade job holds a student app. `0` (default) waits indefinitely in FIFO order; a student still queued after *N* seconds is reported failed |
 | `--continue-on-error` | Keep going after a lifecycle/validation failure |
 | `--skip-missing-instances` | Skip manifest instances not visible via `instances list` |
 | `--pull-logs` / `--no-pull-logs` | After execute, copy logs to instructor (default: pull) |
@@ -318,8 +262,6 @@ Recommended order on a new assignment:
 | Validation command exited with code ≠ 0 | Student script failed; inspect `output.log` / `error.log` under results |
 | Log pull failed / files missing on master | Distribute/FS settle issue; check `/files/grade_results/<run_id>/...` on master after refresh |
 | Parallelism ignored | Without `--continue-on-error`, workers are forced to 1 so the run can stop after the first failure |
-| Run appears to hang at "queued for app …" | Another grade job holds that app; it starts automatically when the holder finishes, or bound it with `--queue-timeout` ([Queuing per student app](#queuing-per-student-app)) |
-| Student failed: "timed out … waiting in the queue" | `--queue-timeout` elapsed while another job held the app; raise it or clear a leftover workload |
 | Student failed: "timed out … waiting for command completion" | The validation command never wrote `.cmd_done`; check `output.log` under the results dir, or raise `--exec-timeout` (`0` waits indefinitely) |
 
 ## Related guides

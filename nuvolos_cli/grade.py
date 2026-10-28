@@ -24,7 +24,6 @@ from tabulate import tabulate
 from .api_client import (
     distribute_content,
     execute_command_in_app,
-    list_all_running_workloads_for_app,
     list_apps,
     list_files,
     list_instances,
@@ -354,38 +353,6 @@ def _best_effort_stop_app(
         return False
 
 
-def _stop_app_if_running(
-    *,
-    org_slug: str,
-    space_slug: str,
-    instance_slug: str,
-    app_slug: str,
-    reason: str,
-) -> bool:
-    """Stop only when a workload is present; silent no-op if already stopped."""
-    try:
-        workloads = list_all_running_workloads_for_app(
-            org_slug=org_slug,
-            space_slug=space_slug,
-            instance_slug=instance_slug,
-            app_slug=app_slug,
-        )
-    except Exception as exc:
-        clog.debug(
-            f"[{instance_slug}] could not list workloads before stop ({reason}): {exc}"
-        )
-        workloads = None
-    if workloads is not None and len(workloads) == 0:
-        return False
-    return _best_effort_stop_app(
-        org_slug=org_slug,
-        space_slug=space_slug,
-        instance_slug=instance_slug,
-        app_slug=app_slug,
-        reason=reason,
-    )
-
-
 def _as_files_abs_path(path: str | Path) -> str:
     """Normalize a results path to an absolute /files/... path for cross-instance use."""
     p = Path(path).expanduser()
@@ -482,8 +449,8 @@ def _wrap_command_with_done_file(
         f"mkdir -p \"$work\"\n"
         f"{{\n{command}\n}} > {out_q} 2>&1\n"
         f"ec=$?\n"
-        f"printf '%s' \"$ec\" > \"$done_file\"\n"
         f": > \"$work/.cmd_exit.$ec\"\n"
+        f"printf '%s' \"$ec\" > \"$done_file\"\n"
         f"exit \"$ec\""
     )
 
@@ -1325,10 +1292,24 @@ def _is_not_found_error(exc: BaseException) -> bool:
     that predates the 404 translation.
     """
     status = getattr(exc, "status", None) or getattr(exc, "http_code", None)
+    try:
+        status = int(status)
+    except (TypeError, ValueError):
+        status = None
+    if status in (401, 403):
+        return False
     if status == 404:
         return True
-    body = f"{getattr(exc, 'body', '') or ''}{exc}"
-    return "item_not_found" in body or "source_not_found" in body
+    body = getattr(exc, "body", None)
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except (TypeError, ValueError):
+            return False
+    return isinstance(body, dict) and body.get("code") in {
+        "item_not_found",
+        "source_not_found",
+    }
 
 
 class _ReadinessQueue:
@@ -1341,9 +1322,14 @@ class _ReadinessQueue:
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._condition = threading.Condition(self._lock)
         self._next_check: dict[tuple, float] = {}
         self._interval: dict[tuple, float] = {}
+        self._inflight: set[tuple] = set()
+        self._generation: dict[tuple, int] = {}
+        self._entries: dict[tuple, list | None] = {}
+        self._waiters: dict[tuple, dict[object, int]] = {}
 
     @staticmethod
     def _key(org_slug, space_slug, instance_slug, dir_rel):
@@ -1395,49 +1381,92 @@ class _ReadinessQueue:
         start = time.time()
         check_abort = should_abort or _abort_requested
         label = description or dir_rel or "/"
-        while timeout_secs is None or time.time() - start < timeout_secs:
-            if check_abort():
-                raise KeyboardInterrupt(
-                    f"grade aborted while waiting for {label} on [{instance_slug}]"
-                )
-            delay = self._due_in(key)
-            if delay > 0:
-                # This directory was polled very recently (possibly by another
-                # student's waiter); wait out the interval instead of issuing
-                # a duplicate call.
-                time.sleep(min(delay, 1.0))
-                continue
-            entries = None
-            try:
-                entries = list_files(
-                    org_slug=org_slug,
-                    space_slug=space_slug,
-                    instance_slug=instance_slug,
-                    snapshot_slug="development",
-                    area="files",
-                    local_path=dir_rel or None,
-                )
-            except Exception as exc:
-                if _is_not_found_error(exc):
-                    clog.debug(
-                        f"[{instance_slug}] {label} does not exist yet; re-checking."
+        waiter = object()
+        with self._condition:
+            generation = self._generation.get(key, 0)
+            self._waiters.setdefault(key, {})[waiter] = generation
+
+        try:
+            while timeout_secs is None or time.time() - start < timeout_secs:
+                if check_abort():
+                    raise KeyboardInterrupt(
+                        f"grade aborted while waiting for {label} on [{instance_slug}]"
                     )
-                else:
-                    clog.debug(f"list_files poll failed for {label}: {exc}")
-            if entries is not None:
-                result = predicate(entries)
-                if result:
-                    self.forget(
-                        org_slug=org_slug,
-                        space_slug=space_slug,
-                        instance_slug=instance_slug,
-                        dir_rel=dir_rel,
-                    )
-                    return result
-            # Directory exists but the awaited item is not in it yet: keep the
-            # fast cadence. Directory itself still absent: back off.
-            self._schedule_next(key, reset=entries is not None)
-        return None
+
+                entries = None
+                evaluate = False
+                poll = False
+                with self._condition:
+                    generation = self._generation.get(key, 0)
+                    waiters = self._waiters[key]
+                    if generation > waiters[waiter]:
+                        entries = self._entries[key]
+                        waiters[waiter] = generation
+                        evaluate = entries is not None
+                    elif key in self._inflight or any(
+                        seen < generation for seen in waiters.values()
+                    ):
+                        self._condition.wait(timeout=1.0)
+                    else:
+                        delay = max(
+                            0.0, self._next_check.get(key, 0.0) - time.time()
+                        )
+                        if delay > 0:
+                            self._condition.wait(timeout=min(delay, 1.0))
+                        else:
+                            self._inflight.add(key)
+                            poll = True
+
+                if evaluate:
+                    result = predicate(entries)
+                    if result:
+                        self.forget(
+                            org_slug=org_slug,
+                            space_slug=space_slug,
+                            instance_slug=instance_slug,
+                            dir_rel=dir_rel,
+                        )
+                        return result
+                if poll:
+                    entries = None
+                    try:
+                        entries = list_files(
+                            org_slug=org_slug,
+                            space_slug=space_slug,
+                            instance_slug=instance_slug,
+                            snapshot_slug="development",
+                            area="files",
+                            local_path=dir_rel or None,
+                        )
+                    except Exception as exc:
+                        if _is_not_found_error(exc):
+                            clog.debug(
+                                f"[{instance_slug}] {label} does not exist yet; re-checking."
+                            )
+                        else:
+                            clog.debug(f"list_files poll failed for {label}: {exc}")
+                    except BaseException:
+                        with self._condition:
+                            self._inflight.discard(key)
+                            self._condition.notify_all()
+                        raise
+                    with self._condition:
+                        self._entries[key] = entries
+                        self._generation[key] = self._generation.get(key, 0) + 1
+                        self._inflight.discard(key)
+                        # Directory exists but the awaited item is not in it:
+                        # keep the fast cadence. If it is absent, back off.
+                        self._schedule_next(key, reset=entries is not None)
+                        self._condition.notify_all()
+            return None
+        finally:
+            with self._condition:
+                waiters = self._waiters.get(key)
+                if waiters is not None:
+                    waiters.pop(waiter, None)
+                    if not waiters:
+                        self._waiters.pop(key, None)
+                self._condition.notify_all()
 
 
 _READINESS_QUEUE = _ReadinessQueue()
@@ -1981,19 +2010,6 @@ def test_one_student(
         return _abort_requested()
 
     try:
-        if should_abort():
-            raise KeyboardInterrupt(
-                f"grade aborted before starting [{instance_slug}]"
-            )
-        # Clear leftover workload from a previous aborted run so a restart
-        # does not stack a second bot/process on the same student app.
-        _stop_app_if_running(
-            org_slug=org_slug,
-            space_slug=space_slug,
-            instance_slug=instance_slug,
-            app_slug=app_slug,
-            reason="pre-start orphan cleanup",
-        )
         if should_abort():
             raise KeyboardInterrupt(
                 f"grade aborted before starting [{instance_slug}]"
