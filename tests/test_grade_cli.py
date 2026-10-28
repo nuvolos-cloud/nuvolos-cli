@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -693,10 +694,11 @@ def test_abort_handlers_ignore_second_signal_and_restore():
 
 
 
-def test_test_one_student_stops_app_on_abort(monkeypatch):
+def test_test_one_student_stops_app_on_abort(monkeypatch, tmp_path):
     """Ctrl+C mid-wait must still stop the student app (finally + registry)."""
     from nuvolos_cli import grade as grade_mod
 
+    monkeypatch.setattr(grade_mod, "GRADE_QUEUE_ROOT", str(tmp_path))
     calls = []
 
     def fake_stop(**kwargs):
@@ -713,6 +715,11 @@ def test_test_one_student_stops_app_on_abort(monkeypatch):
     monkeypatch.setattr(grade_mod, "start_app", fake_start)
     monkeypatch.setattr(grade_mod, "wait_for_app_running", fake_wait)
     monkeypatch.setattr(grade_mod, "list_apps", lambda **kw: [{"slug": "bot"}])
+    # No pre-existing workload → the job lock is free.
+    monkeypatch.setattr(
+        grade_mod, "list_all_running_workloads_for_app", lambda **kw: []
+    )
+
     registry = grade_mod._StartedAppRegistry()
     grade_mod._set_active_registry(registry)
     try:
@@ -737,7 +744,266 @@ def test_test_one_student_stops_app_on_abort(monkeypatch):
     assert registry.snapshot() == []
 
 
+def test_test_one_student_waits_for_busy_app_then_runs(monkeypatch, tmp_path):
+    """A workload owned by another job delays the start; it does not skip."""
+    from nuvolos_cli import grade as grade_mod
 
+    queue_root = tmp_path / "shared-queue"
+    monkeypatch.setattr(grade_mod, "GRADE_QUEUE_ROOT", str(queue_root))
+    calls = []
+    probes = {"n": 0}
+
+    def fake_workloads(**kwargs):
+        # Busy for the first two polls, then the other job finishes.
+        probes["n"] += 1
+        return [{"status": "RUNNING"}] if probes["n"] <= 2 else []
+
+    monkeypatch.setattr(
+        grade_mod, "start_app", lambda **kw: calls.append(("start", kw["instance_slug"]))
+    )
+    monkeypatch.setattr(
+        grade_mod, "stop_app", lambda **kw: calls.append(("stop", kw["instance_slug"]))
+    )
+    monkeypatch.setattr(grade_mod, "wait_for_app_running", lambda **kw: None)
+    monkeypatch.setattr(grade_mod, "list_apps", lambda **kw: [{"slug": "bot"}])
+    monkeypatch.setattr(grade_mod, "list_all_running_workloads_for_app", fake_workloads)
+    monkeypatch.setattr(grade_mod, "execute_command_in_app", lambda **kw: {})
+    monkeypatch.setattr(grade_mod, "_wait_for_execute_completion", lambda **kw: 0)
+    monkeypatch.setattr(grade_mod, "_as_files_abs_path", lambda path: str(path))
+    monkeypatch.setattr(grade_mod.time, "sleep", lambda _s: None)
+
+    rec = grade_mod.test_one_student(
+        org_slug="org1",
+        space_slug="space1",
+        instance_slug="stu_a",
+        app_slug="bot",
+        command="python bot.py",
+        run_id="run1",
+        results_root=str(tmp_path / "results"),
+        student_folder="alice@ex.com",
+        pull_logs=False,
+    )
+
+    assert rec["status"] == "executed"
+    assert rec["queued"] is True
+    # Waited out the foreign workload instead of starting a second one.
+    assert probes["n"] == 3
+    assert ("start", "stu_a") in calls
+    assert (queue_root / grade_mod.GRADE_QUEUE_DIRNAME).is_dir()
+    assert not (tmp_path / "results" / grade_mod.GRADE_QUEUE_DIRNAME).exists()
+
+
+def test_test_one_student_fails_when_workload_state_is_unknown(
+    monkeypatch, tmp_path
+):
+    from nuvolos_cli import grade as grade_mod
+
+    starts = []
+
+    def fail_lookup(**kwargs):
+        raise RuntimeError("lookup failed")
+
+    monkeypatch.setattr(grade_mod, "GRADE_QUEUE_ROOT", str(tmp_path))
+    monkeypatch.setattr(grade_mod, "list_apps", lambda **kw: [{"slug": "bot"}])
+    monkeypatch.setattr(grade_mod, "list_all_running_workloads_for_app", fail_lookup)
+    monkeypatch.setattr(grade_mod, "start_app", lambda **kw: starts.append(True))
+
+    record = grade_mod.test_one_student(
+        org_slug="org1",
+        space_slug="space1",
+        instance_slug="stu_a",
+        app_slug="bot",
+        command="python bot.py",
+        run_id="run1",
+        results_root=str(tmp_path / "results"),
+        student_folder="alice@ex.com",
+        pull_logs=False,
+    )
+
+    assert record["status"] == "failed"
+    assert "could not determine workload state" in record["error"]
+    assert starts == []
+
+
+def test_file_ticket_heartbeat_covers_workload_wait(monkeypatch, tmp_path):
+    from nuvolos_cli import grade as grade_mod
+
+    real_queue_class = grade_mod._FileTicketQueue
+    queues = []
+    ticket_survived_wait = []
+
+    def make_queue(root):
+        queue = real_queue_class(root, stale_after_secs=0.4)
+        queues.append(queue)
+        return queue
+
+    def fake_workloads(**kwargs):
+        threading.Event().wait(0.65)
+        queue = queues[0]
+        key = ("org1", "space1", "stu_a", "bot")
+        ticket_survived_wait.append(
+            bool(queue._live_tickets(queue._queue_dir(key)))
+        )
+        return []
+
+    monkeypatch.setattr(grade_mod, "GRADE_QUEUE_ROOT", str(tmp_path / "queue"))
+    monkeypatch.setattr(grade_mod, "_FileTicketQueue", make_queue)
+    monkeypatch.setattr(grade_mod, "list_apps", lambda **kw: [{"slug": "bot"}])
+    monkeypatch.setattr(grade_mod, "list_all_running_workloads_for_app", fake_workloads)
+    monkeypatch.setattr(grade_mod, "start_app", lambda **kw: None)
+    monkeypatch.setattr(grade_mod, "stop_app", lambda **kw: None)
+    monkeypatch.setattr(grade_mod, "wait_for_app_running", lambda **kw: None)
+    monkeypatch.setattr(grade_mod, "execute_command_in_app", lambda **kw: {})
+    monkeypatch.setattr(grade_mod, "_wait_for_execute_completion", lambda **kw: 0)
+    monkeypatch.setattr(grade_mod, "_as_files_abs_path", lambda path: str(path))
+
+    record = grade_mod.test_one_student(
+        org_slug="org1",
+        space_slug="space1",
+        instance_slug="stu_a",
+        app_slug="bot",
+        command="python bot.py",
+        run_id="run1",
+        results_root=str(tmp_path / "results"),
+        student_folder="alice@ex.com",
+        pull_logs=False,
+    )
+
+    assert record["status"] == "executed"
+    assert ticket_survived_wait == [True]
+
+
+def test_test_one_student_queue_timeout_reports_failure(monkeypatch, tmp_path):
+    """An app held past --queue-timeout fails that student; never double-starts."""
+    from nuvolos_cli import grade as grade_mod
+
+    calls = []
+    monkeypatch.setattr(grade_mod, "GRADE_QUEUE_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        grade_mod, "start_app", lambda **kw: calls.append("start")
+    )
+    monkeypatch.setattr(grade_mod, "stop_app", lambda **kw: calls.append("stop"))
+    monkeypatch.setattr(grade_mod, "list_apps", lambda **kw: [{"slug": "bot"}])
+    monkeypatch.setattr(
+        grade_mod,
+        "list_all_running_workloads_for_app",
+        lambda **kw: [{"status": "RUNNING"}],
+    )
+    monkeypatch.setattr(grade_mod.time, "sleep", lambda _s: None)
+
+    rec = grade_mod.test_one_student(
+        org_slug="org1",
+        space_slug="space1",
+        instance_slug="stu_a",
+        app_slug="bot",
+        command="python bot.py",
+        run_id="run1",
+        results_root=str(tmp_path),
+        student_folder="alice@ex.com",
+        pull_logs=False,
+        queue_timeout_secs=1,
+    )
+
+    assert rec["status"] == "failed"
+    assert "timed out" in rec["error"]
+    assert calls == []
+
+
+def test_app_job_queue_serializes_in_fifo_order():
+    """Second waiter runs only after the holder releases, in arrival order."""
+    from nuvolos_cli import grade as grade_mod
+
+    queue = grade_mod._AppJobQueue()
+    key = ("org1", "space1", "stu_a", "bot")
+    order: list[str] = []
+    queued = threading.Event()
+
+    assert queue.acquire(key) is True
+    order.append("first-acquired")
+
+    def second():
+        queue.acquire(key, on_wait=lambda _ahead: queued.set())
+        order.append("second-acquired")
+        queue.release(key)
+
+    waiter = threading.Thread(target=second)
+    waiter.start()
+    try:
+        assert queued.wait(timeout=5)
+        # Still blocked while the first holder owns the key.
+        assert order == ["first-acquired"]
+        order.append("first-released")
+        queue.release(key)
+    finally:
+        waiter.join(timeout=5)
+
+    assert order == ["first-acquired", "first-released", "second-acquired"]
+
+
+def test_app_job_queue_timeout_releases_slot_for_next_waiter():
+    """A waiter that times out must not strand the queue head."""
+    from nuvolos_cli import grade as grade_mod
+
+    queue = grade_mod._AppJobQueue()
+    key = ("org1", "space1", "stu_a", "bot")
+
+    assert queue.acquire(key) is True
+    assert queue.acquire(key, timeout_secs=0.1) is False
+    queue.release(key)
+    assert queue.acquire(key, timeout_secs=0.1) is True
+    queue.release(key)
+
+
+def test_file_ticket_queue_orders_across_processes(tmp_path):
+    """Ticket files give cross-process FIFO and self-heal stale entries."""
+    from nuvolos_cli import grade as grade_mod
+
+    key = ("org1", "space1", "stu_a", "bot")
+    q = grade_mod._FileTicketQueue(tmp_path)
+
+    first = q.take_ticket(key)
+    second = q.take_ticket(key)
+    assert q.position(key, first) == 0
+    assert q.position(key, second) == 1
+
+    q.release(first)
+    assert q.position(key, second) == 0
+
+    # A ticket from a crashed CLI is pruned instead of blocking the queue.
+    reaper = grade_mod._FileTicketQueue(tmp_path, stale_after_secs=0)
+    stale = reaper.take_ticket(key)
+    assert reaper.position(key, second) == 0
+    assert not stale.exists()
+    q.release(second)
+
+
+def test_file_ticket_queue_allocates_unique_order_under_concurrency(
+    tmp_path, monkeypatch
+):
+    from nuvolos_cli import grade as grade_mod
+
+    key = ("org1", "space1", "stu_a", "bot")
+    queue = grade_mod._FileTicketQueue(tmp_path)
+    original_live_tickets = queue._live_tickets
+
+    def delayed_live_tickets(queue_dir):
+        live = original_live_tickets(queue_dir)
+        threading.Event().wait(0.05)
+        return live
+
+    monkeypatch.setattr(queue, "_live_tickets", delayed_live_tickets)
+    workers = 8
+    start = threading.Barrier(workers)
+
+    def take_ticket(_):
+        start.wait()
+        return queue.take_ticket(key)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        tickets = list(executor.map(take_ticket, range(workers)))
+
+    sequences = sorted(int(ticket.name.split("-", 1)[0]) for ticket in tickets)
+    assert sequences == list(range(workers))
 
 
 def test_run_grade_check_aborts_stops_started_apps(monkeypatch, tmp_path):
@@ -800,6 +1066,7 @@ def test_run_grade_check_aborts_stops_started_apps(monkeypatch, tmp_path):
     monkeypatch.setattr(grade_mod, "list_space_members", lambda **kw: [])
     monkeypatch.setattr(grade_mod, "_as_files_abs_path", fake_files_path)
     monkeypatch.setattr(grade_mod, "DEFAULT_GRADE_WORK_ROOT", str(work))
+    monkeypatch.setattr(grade_mod, "GRADE_QUEUE_ROOT", str(tmp_path / "queue"))
 
 
     with pytest.raises(ClickException, match="Grade run aborted"):
@@ -919,6 +1186,7 @@ def test_parallel_abort_stops_started_app_and_skips_late_start(monkeypatch, tmp_
     monkeypatch.setattr(grade_mod, "list_space_members", lambda **kwargs: [])
     monkeypatch.setattr(grade_mod, "_as_files_abs_path", fake_files_path)
     monkeypatch.setattr(grade_mod, "DEFAULT_GRADE_WORK_ROOT", str(work))
+    monkeypatch.setattr(grade_mod, "GRADE_QUEUE_ROOT", str(tmp_path / "queue"))
 
     with pytest.raises(ClickException, match="Grade run aborted"):
         grade_mod.run_grade_check(
@@ -960,12 +1228,13 @@ def test_wait_loop_raises_when_abort_requested(monkeypatch):
         grade_mod._set_active_registry(None)
 
 
-def test_late_worker_does_not_start_after_globals_cleared(monkeypatch):
+def test_late_worker_does_not_start_after_globals_cleared(monkeypatch, tmp_path):
     """Abort cleanup may clear the global pointer; the captured registry still blocks start."""
     from nuvolos_cli import grade as grade_mod
 
     registry = grade_mod._StartedAppRegistry()
     grade_mod._set_active_registry(registry)
+    monkeypatch.setattr(grade_mod, "GRADE_QUEUE_ROOT", str(tmp_path))
     starts = []
 
     def fake_get_active_registry():

@@ -8,11 +8,13 @@ each selected student application.
 from __future__ import annotations
 
 import atexit
+import fcntl
 import json
 import os
 import signal
 import threading
 import time
+import uuid
 from concurrent.futures import Future
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,6 +54,14 @@ GRADE_META_FILENAME = "grade_meta.json"
 # dedicated child directory so they never collide with identically named
 # files already present in a student's submission.
 GRADE_ARTIFACTS_DIRNAME = "_grading"
+# Cross-process/cross-user FIFO: one ticket file per waiting grade job, under
+# the shared /files tree so every instructor's CLI sees the same queue.
+GRADE_QUEUE_DIRNAME = ".nuvolos_grade_queue"
+GRADE_QUEUE_ROOT = "/files"
+# A ticket older than this is treated as abandoned (crashed CLI, lost shell).
+GRADE_TICKET_STALE_SECS = 3600
+# How long a queued job waits for its turn before giving up (0 = forever).
+DEFAULT_QUEUE_TIMEOUT_SECS = 0
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +179,184 @@ class _StartedAppRegistry:
                     f"[{instance_slug}]: {exc}"
                 )
         return stopped
+
+
+class _AppJobQueue:
+    """FIFO admission for grade jobs, one at a time per student app.
+
+    Keyed by ``(org, space, instance, app)``. Jobs inside this process wait
+    their turn in arrival order; cross-process/cross-user ordering comes from
+    the ticket queue on the shared ``/files`` tree (see ``_FileTicketQueue``).
+    """
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._held: set[tuple[str, str, str, str]] = set()
+        self._waiting: dict[tuple[str, str, str, str], list[int]] = {}
+        self._next_ticket = 0
+
+    def acquire(
+        self,
+        key: tuple[str, str, str, str],
+        *,
+        timeout_secs: float | None = None,
+        should_abort=None,
+        on_wait=None,
+    ) -> bool:
+        """Block until this job owns ``key``.
+
+        Returns False only on timeout. Raises KeyboardInterrupt when
+        ``should_abort`` turns true while queued, so an aborting run does not
+        keep waiting for a slot it will never use.
+        """
+        deadline = None if timeout_secs is None else time.monotonic() + timeout_secs
+        notified = False
+        with self._cond:
+            ticket = self._next_ticket
+            self._next_ticket += 1
+            queue = self._waiting.setdefault(key, [])
+            queue.append(ticket)
+            try:
+                while True:
+                    if should_abort is not None and should_abort():
+                        raise KeyboardInterrupt(
+                            f"grade aborted while queued for app [{key[3]}] "
+                            f"on [{key[2]}]"
+                        )
+                    if key not in self._held and queue[0] == ticket:
+                        self._held.add(key)
+                        return True
+                    if not notified and on_wait is not None:
+                        # Position excludes the ticket currently being served.
+                        on_wait(queue.index(ticket) + (1 if key in self._held else 0))
+                        notified = True
+                    if deadline is None:
+                        remaining = 1.0
+                    else:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            return False
+                    # Bounded wait so should_abort is re-checked while queued.
+                    self._cond.wait(min(1.0, remaining))
+            finally:
+                queue.remove(ticket)
+                if not queue:
+                    self._waiting.pop(key, None)
+                # A waiter that timed out or aborted must hand the head of the
+                # queue to the next ticket.
+                self._cond.notify_all()
+
+    def release(self, key: tuple[str, str, str, str]) -> None:
+        with self._cond:
+            self._held.discard(key)
+            self._cond.notify_all()
+
+
+_app_job_queue = _AppJobQueue()
+
+
+class _FileTicketQueue:
+    """Cross-process FIFO per student app, backed by ticket files on /files.
+
+    Every waiting job writes ``<seq>-<pid>-<uuid>.json`` into a per-app queue
+    directory on the instructor's shared ``/files`` tree. The lowest sequence
+    number owns the app; everyone else waits. ``/files`` is the only storage
+    both instructor CLIs already share, so no new service is required.
+
+    Tickets are self-healing: an entry older than ``stale_after_secs`` is
+    removed, so a crashed CLI cannot block the queue forever.
+    """
+
+    def __init__(self, root: str | Path, *, stale_after_secs: int = GRADE_TICKET_STALE_SECS):
+        self._root = Path(root)
+        self._stale_after_secs = stale_after_secs
+
+    def _queue_dir(self, key: tuple[str, str, str, str]) -> Path:
+        org_slug, space_slug, instance_slug, app_slug = key
+        safe = "__".join(
+            _safe_student_folder_name(part, "unknown")
+            for part in (org_slug, space_slug, instance_slug, app_slug)
+        )
+        return self._root / GRADE_QUEUE_DIRNAME / safe
+
+    def _live_tickets(self, queue_dir: Path) -> list[tuple[int, Path]]:
+        """Sorted (seq, path) of non-stale tickets; prunes abandoned ones."""
+        now = time.time()
+        live: list[tuple[int, Path]] = []
+        for entry in sorted(queue_dir.glob("*.json")):
+            try:
+                age = now - entry.stat().st_mtime
+            except OSError:
+                continue
+            if age > self._stale_after_secs:
+                clog.warning(
+                    f"Removing stale grade queue ticket {entry.name} "
+                    f"(age={int(age)}s)."
+                )
+                entry.unlink(missing_ok=True)
+                continue
+            try:
+                seq = int(entry.name.split("-", 1)[0])
+            except ValueError:
+                continue
+            live.append((seq, entry))
+        live.sort(key=lambda row: (row[0], row[1].name))
+        return live
+
+    def take_ticket(self, key: tuple[str, str, str, str]) -> Path:
+        """Reserve this job's place in line; returns the ticket path."""
+        queue_dir = self._queue_dir(key)
+        queue_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = queue_dir / ".allocation.lock"
+        with lock_path.open("a", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                existing = self._live_tickets(queue_dir)
+                seq = (existing[-1][0] + 1) if existing else 0
+                ticket = queue_dir / (
+                    f"{seq:012d}-{os.getpid()}-{uuid.uuid4().hex}.json"
+                )
+                with ticket.open("x", encoding="utf-8") as fh:
+                    json.dump(
+                        {
+                            "pid": os.getpid(),
+                            "org_slug": key[0],
+                            "space_slug": key[1],
+                            "instance_slug": key[2],
+                            "app_slug": key[3],
+                            "queued_at": _utc_now_iso(),
+                        },
+                        fh,
+                    )
+                return ticket
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def position(self, key: tuple[str, str, str, str], ticket: Path) -> int:
+        """0 when this ticket owns the app, else how many jobs are ahead."""
+        queue_dir = self._queue_dir(key)
+        for _attempt in range(2):
+            names = [path.name for _seq, path in self._live_tickets(queue_dir)]
+            if ticket.name in names:
+                return names.index(ticket.name)
+            # Our own ticket was pruned (clock skew, or stale_after_secs=0):
+            # re-assert it once, then fall back to "our turn" rather than loop.
+            queue_dir.mkdir(parents=True, exist_ok=True)
+            ticket.touch()
+        return 0
+
+    def heartbeat(self, ticket: Path) -> None:
+        """Keep a long-waiting ticket from being pruned as abandoned."""
+        try:
+            ticket.touch()
+        except OSError as exc:
+            clog.debug(f"Could not refresh grade queue ticket {ticket}: {exc}")
+
+    def release(self, ticket: Path) -> None:
+        try:
+            ticket.unlink(missing_ok=True)
+        except OSError as exc:
+            clog.warning(f"Could not remove grade queue ticket {ticket}: {exc}")
 
 
 _active_registry_lock = threading.Lock()
@@ -351,6 +539,95 @@ def _best_effort_stop_app(
             f"[{instance_slug}] failed to stop app [{app_slug}] ({reason}): {exc}"
         )
         return False
+
+
+def _running_workloads_for_app(
+    *,
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    app_slug: str,
+    context: str,
+) -> list | None:
+    """Running workloads for one app; ``None`` when the lookup itself failed."""
+    try:
+        workloads = list_all_running_workloads_for_app(
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=instance_slug,
+            app_slug=app_slug,
+        )
+    except Exception as exc:
+        clog.debug(
+            f"[{instance_slug}] could not list workloads for [{app_slug}] "
+            f"({context}): {exc}"
+        )
+        return None
+    return list(workloads or [])
+
+
+def _wait_until_app_free(
+    *,
+    org_slug: str,
+    space_slug: str,
+    instance_slug: str,
+    app_slug: str,
+    timeout_secs: float | None,
+    should_abort=None,
+    on_wait=None,
+    poll_secs: float = 10.0,
+) -> bool:
+    """Wait until no workload runs for the app. False only on timeout.
+
+    Covers workloads this process does not own: a job from another instructor's
+    CLI that is mid-run, a student-started app, or a leftover from an aborted
+    run. If workload state cannot be determined, fail instead of admitting the
+    job while the app may still be busy.
+    """
+    deadline = None if timeout_secs is None else time.monotonic() + timeout_secs
+    announced = False
+    while True:
+        if should_abort is not None and should_abort():
+            raise KeyboardInterrupt(
+                f"grade aborted while waiting for app [{app_slug}] on "
+                f"[{instance_slug}] to become free"
+            )
+        running = _running_workloads_for_app(
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=instance_slug,
+            app_slug=app_slug,
+            context="queue admission",
+        )
+        if running is None:
+            raise RuntimeError(
+                f"could not determine workload state for app [{app_slug}] "
+                f"on [{instance_slug}]; refusing to start"
+            )
+        if not running:
+            if announced:
+                clog.info(f"[{instance_slug}] app [{app_slug}] is free; proceeding.")
+                click.echo(f">>> [{instance_slug}] app free; starting now.")
+            return True
+        if not announced:
+            clog.info(
+                f"[{instance_slug}] app [{app_slug}] has {len(running)} running "
+                f"workload(s) owned by another job; waiting for it to finish."
+            )
+            click.echo(
+                f">>> [{instance_slug}] app [{app_slug}] busy "
+                f"({len(running)} workload(s)); queued behind it…"
+            )
+            if on_wait is not None:
+                on_wait(len(running))
+            announced = True
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(poll_secs, remaining))
+        else:
+            time.sleep(poll_secs)
 
 
 def _as_files_abs_path(path: str | Path) -> str:
@@ -1875,6 +2152,7 @@ def test_one_student(
     instructor_instance_slug: str = "master",
     pull_logs: bool = True,
     exec_timeout_secs: int | None = None,
+    queue_timeout_secs: int | None = DEFAULT_QUEUE_TIMEOUT_SECS,
 ) -> dict:
     """Start → wait RUNNING → execute → pull logs to instructor → stop."""
     folder = student_folder or instance_slug
@@ -1890,6 +2168,7 @@ def test_one_student(
         "instructor_logs": None,
         "error": None,
         "stopped": None,
+        "queued": False,
     }
     clog.info(
         f"[{instance_slug}] check queued for app [{app_slug}] "
@@ -2002,6 +2281,15 @@ def test_one_student(
 
 
     registry = _get_active_registry()
+    queue_key = (org_slug, space_slug, instance_slug, app_slug)
+    queue_held = False
+    file_ticket: Path | None = None
+    ticket_queue = _FileTicketQueue(GRADE_QUEUE_ROOT)
+    ticket_heartbeat_stop = threading.Event()
+    ticket_heartbeat_thread: threading.Thread | None = None
+    wait_budget = (
+        None if not queue_timeout_secs else float(queue_timeout_secs)
+    )
 
     def should_abort() -> bool:
         # Captured registry stays aborted even after the global pointer is cleared.
@@ -2009,7 +2297,124 @@ def test_one_student(
             return True
         return _abort_requested()
 
+    def _queue_timed_out(stage: str) -> dict:
+        reason = (
+            f"timed out after {queue_timeout_secs}s waiting in the queue for "
+            f"app [{app_slug}] ({stage}); another grade job still holds it."
+        )
+        record["status"] = "failed"
+        record["error"] = reason
+        record["queued"] = True
+        clog.error(f"[{instance_slug}] {reason}")
+        click.echo(f"!!! [{instance_slug}] {reason}")
+        return record
+
     try:
+        if should_abort():
+            raise KeyboardInterrupt(
+                f"grade aborted before starting [{instance_slug}]"
+            )
+        queue_started = time.monotonic()
+
+        def _announce_local_position(ahead: int) -> None:
+            record["queued"] = True
+            clog.info(
+                f"[{instance_slug}] queued for app [{app_slug}]: {ahead} job(s) "
+                f"ahead in this run."
+            )
+            click.echo(
+                f">>> [{instance_slug}] queued for app [{app_slug}] "
+                f"({ahead} ahead in this run)…"
+            )
+
+        # Stage 1: FIFO inside this process (parallel workers, repeated items).
+        if not _app_job_queue.acquire(
+            queue_key,
+            timeout_secs=wait_budget,
+            should_abort=should_abort,
+            on_wait=_announce_local_position,
+        ):
+            return _queue_timed_out("local queue")
+        queue_held = True
+
+        def _remaining_budget() -> float | None:
+            if wait_budget is None:
+                return None
+            return max(0.0, wait_budget - (time.monotonic() - queue_started))
+
+        # Stage 2: FIFO across processes/users via ticket files on /files.
+        try:
+            file_ticket = ticket_queue.take_ticket(queue_key)
+        except OSError as exc:
+            # Shared tree not writable here (tests, restricted mount):
+            # stage 3 still serializes against other runs' workloads.
+            clog.warning(
+                f"[{instance_slug}] shared grade queue unavailable "
+                f"({exc}); relying on running-workload checks only."
+            )
+            ticket_queue = None
+        if ticket_queue is not None and file_ticket is not None:
+
+            def _keep_ticket_alive() -> None:
+                interval = max(
+                    0.1, min(60.0, ticket_queue._stale_after_secs / 3)
+                )
+                while not ticket_heartbeat_stop.wait(interval):
+                    ticket_queue.heartbeat(file_ticket)
+
+            ticket_heartbeat_thread = threading.Thread(
+                target=_keep_ticket_alive,
+                name=f"grade-ticket-{instance_slug}",
+                daemon=True,
+            )
+            ticket_heartbeat_thread.start()
+        if ticket_queue is not None and file_ticket is not None:
+            announced = False
+            while True:
+                if should_abort():
+                    raise KeyboardInterrupt(
+                        f"grade aborted while queued for [{instance_slug}]"
+                    )
+                ahead = ticket_queue.position(queue_key, file_ticket)
+                if ahead == 0:
+                    if announced:
+                        click.echo(f">>> [{instance_slug}] queue turn reached.")
+                    break
+                if not announced:
+                    record["queued"] = True
+                    clog.info(
+                        f"[{instance_slug}] queued for app [{app_slug}]: {ahead} "
+                        f"job(s) ahead from other grade runs."
+                    )
+                    click.echo(
+                        f">>> [{instance_slug}] queued for app [{app_slug}] "
+                        f"({ahead} ahead from other runs); waiting…"
+                    )
+                    announced = True
+                remaining = _remaining_budget()
+                if remaining is not None and remaining <= 0:
+                    return _queue_timed_out("shared queue")
+                ticket_queue.heartbeat(file_ticket)
+                time.sleep(5 if remaining is None else min(5.0, remaining))
+
+        # Stage 3: the app itself must be free (foreign/leftover workloads).
+        if not _wait_until_app_free(
+            org_slug=org_slug,
+            space_slug=space_slug,
+            instance_slug=instance_slug,
+            app_slug=app_slug,
+            timeout_secs=_remaining_budget(),
+            should_abort=should_abort,
+            on_wait=lambda _n: record.__setitem__("queued", True),
+        ):
+            return _queue_timed_out("waiting for the app to become free")
+
+        waited = time.monotonic() - queue_started
+        if record.get("queued"):
+            record["queue_wait_secs"] = round(waited, 1)
+            clog.info(
+                f"[{instance_slug}] admitted after {waited:.0f}s in queue."
+            )
         if should_abort():
             raise KeyboardInterrupt(
                 f"grade aborted before starting [{instance_slug}]"
@@ -2131,6 +2536,13 @@ def test_one_student(
                 record["stop_error"] = record.get("stop_error") or "stop_app failed"
             if registry is not None and ok:
                 registry.remove(org_slug, space_slug, instance_slug, app_slug)
+        if ticket_heartbeat_thread is not None:
+            ticket_heartbeat_stop.set()
+            ticket_heartbeat_thread.join()
+        if file_ticket is not None and ticket_queue is not None:
+            ticket_queue.release(file_ticket)
+        if queue_held:
+            _app_job_queue.release(queue_key)
         record["finished_at"] = _utc_now_iso()
         clog.info(
             f"[{instance_slug}] finished: status={record['status']}, "
@@ -2161,6 +2573,7 @@ def run_grade_check(
     pull_logs: bool = True,
     instructor_instance_slug: str | None = None,
     exec_timeout_secs: int | None = None,
+    queue_timeout_secs: int | None = DEFAULT_QUEUE_TIMEOUT_SECS,
 ) -> dict:
     """Orchestrator: collect → test → publish into handin/handback structure.
 
@@ -2276,6 +2689,7 @@ def run_grade_check(
         "parallel": parallel,
         "pull_logs": pull_logs,
         "exec_timeout_secs": exec_timeout_secs,
+        "queue_timeout_secs": queue_timeout_secs,
         "instructor_instance_slug": instructor_instance_slug,
         "staging_root": work_root,
         "staging_run_dir": run_results_abs,
@@ -2312,6 +2726,7 @@ def run_grade_check(
             instructor_instance_slug=instructor_instance_slug,
             pull_logs=pull_logs,
             exec_timeout_secs=exec_timeout_secs,
+            queue_timeout_secs=queue_timeout_secs,
         )
         rec.update(
             {
@@ -2776,6 +3191,18 @@ def nv_grade_resolve_manifest(manifest, org, space, instance, fmt):
     ),
 )
 @click.option(
+    "--queue-timeout",
+    "queue_timeout",
+    type=click.IntRange(min=0),
+    default=DEFAULT_QUEUE_TIMEOUT_SECS,
+    show_default=True,
+    help=(
+        "Seconds to wait in the queue when another grade job already holds a "
+        "student app. 0 waits indefinitely (FIFO). A student whose wait "
+        "exceeds this is reported as failed."
+    ),
+)
+@click.option(
     "--all",
     "grade_all",
     is_flag=True,
@@ -2814,6 +3241,7 @@ def nv_grade_check(
     limit,
     parallel,
     exec_timeout,
+    queue_timeout,
     grade_all,
     pull_logs,
     instructor_instance,
@@ -2856,6 +3284,7 @@ def nv_grade_check(
         limit=limit,
         parallel=parallel,
         exec_timeout_secs=exec_timeout,
+        queue_timeout_secs=queue_timeout,
         instance_filter=instance,
         dry_run=dry_run,
         continue_on_error=continue_on_error,
@@ -2880,6 +3309,8 @@ def nv_grade_check(
         click.echo(f"\n• {email or slug}")
         click.echo(f"    instance : {slug}")
         click.echo(f"    status   : {status}" + (f"  exit_code={exit_code}" if exit_code is not None else ""))
+        if rec.get("queue_wait_secs"):
+            click.echo(f"    queued   : {rec.get('queue_wait_secs')}s waiting for the app")
         if err:
             click.echo(f"    error    : {err}")
         if pub.get("handin_dir"):
