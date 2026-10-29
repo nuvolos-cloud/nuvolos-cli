@@ -727,8 +727,8 @@ def _wrap_command_with_done_file(
         f"mkdir -p \"$work\"\n"
         f"{{\n{command}\n}} > {out_q} 2>&1\n"
         f"ec=$?\n"
-        f"printf '%s' \"$ec\" > \"$done_file\"\n"
         f": > \"$work/.cmd_exit.$ec\"\n"
+        f"printf '%s' \"$ec\" > \"$done_file\"\n"
         f"exit \"$ec\""
     )
 
@@ -1476,7 +1476,11 @@ def _wait_for_files_area_path(
     require_nonzero_size: bool = True,
     should_abort=None,
 ) -> bool:
-    """Poll files list until path exists and size is stable.
+    """Wait until ``rel_path`` exists and its size is stable.
+
+    Runs on the shared readiness queue: the parent directory may not exist yet
+    (it is created by the very command being waited on), which the backend
+    reports as a quiet 404 rather than an error.
 
     When require_nonzero_size is True (default), size 0 is not treated as
     complete — empty files can appear while a command is still running.
@@ -1484,32 +1488,18 @@ def _wait_for_files_area_path(
     ``should_abort`` is captured by the worker so clearing the process-global
     registry does not hide an in-flight abort.
     """
-    start = time.time()
-    last_size = None
-    stable = 0
     parent = str(Path(rel_path).parent).replace("\\", "/")
     name = Path(rel_path).name
     if parent in (".", ""):
         parent = ""
-    check_abort = should_abort or _abort_requested
-    while timeout_secs is None or time.time() - start < timeout_secs:
-        if check_abort():
-            raise KeyboardInterrupt(
-                f"grade aborted while waiting for {rel_path} on [{instance_slug}]"
-            )
-        try:
-            entries = list_files(
-                org_slug=org_slug,
-                space_slug=space_slug,
-                instance_slug=instance_slug,
-                snapshot_slug="development",
-                area="files",
-                local_path=parent or None,
-            )
-        except Exception as exc:
-            clog.debug(f"list_files poll failed for {rel_path}: {exc}")
-            time.sleep(2)
-            continue
+    # Size stability is tracked across polls; `stable_rounds` consecutive
+    # identical non-zero sizes mean the writer is done extending the file.
+    # When this directory is shared with other waiters, "consecutive" means
+    # consecutive shared polls, which may skip this waiter's own cadence —
+    # benign, since stability compares values, not timing.
+    state = {"last_size": None, "stable": 0}
+
+    def _settled(entries):
         size = None
         for entry in entries or []:
             d = _model_to_dict(entry) if not isinstance(entry, dict) else entry
@@ -1520,54 +1510,269 @@ def _wait_for_files_area_path(
                 if size is None:
                     size = d.get("storage_used")
                 break
-        if size is not None:
-            try:
-                size_n = int(size)
-            except (TypeError, ValueError):
-                size_n = -1
-            if require_nonzero_size and size_n <= 0:
-                stable = 0
-                last_size = size_n
-            elif size_n == last_size:
-                stable += 1
-                if stable >= stable_rounds:
-                    return True
-            else:
-                stable = 0
-                last_size = size_n
-        time.sleep(2)
-    return False
+        if size is None:
+            return False
+        try:
+            size_n = int(size)
+        except (TypeError, ValueError):
+            size_n = -1
+        if require_nonzero_size and size_n <= 0:
+            state["stable"] = 0
+            state["last_size"] = size_n
+            return False
+        if size_n == state["last_size"]:
+            state["stable"] += 1
+            if state["stable"] >= stable_rounds:
+                return True
+        else:
+            state["stable"] = 0
+            state["last_size"] = size_n
+        return False
+
+    found = _READINESS_QUEUE.wait_for(
+        org_slug=org_slug,
+        space_slug=space_slug,
+        instance_slug=instance_slug,
+        dir_rel=parent,
+        predicate=_settled,
+        timeout_secs=timeout_secs,
+        should_abort=should_abort,
+        description=rel_path,
+    )
+    return bool(found)
 
 
-def _parse_exit_code_from_listing(
-    *,
-    org_slug: str,
-    space_slug: str,
-    instance_slug: str,
-    work_rel: str,
-) -> int | None:
-    """Read `.cmd_exit.<code>` from a files-area listing (no content fetch)."""
+# ---------------------------------------------------------------------------
+# Readiness queue.
+#
+# A grade run watches two kinds of paths that only come into existence while
+# the run is in flight: the per-student work dir (created by `mkdir -p` inside
+# the validation command itself) and the log files staged under it. Absence is
+# therefore the normal first answer, not an error — the backend reports it as
+# HTTP 404 and never pages Slack for it.
+#
+# Checks go through one queue instead of N independent 2s spins so request
+# volume stays proportional to pending work rather than to student count, and
+# so a single directory listing answers every question about that directory
+# (`.cmd_done` presence *and* the `.cmd_exit.<code>` sentinel) instead of
+# listing it twice.
+# ---------------------------------------------------------------------------
+
+READINESS_POLL_MIN_INTERVAL = 2.0
+READINESS_POLL_MAX_INTERVAL = 15.0
+READINESS_POLL_BACKOFF = 1.5
+
+
+def _is_not_found_error(exc: BaseException) -> bool:
+    """True when an API error means "path not there yet", not a real failure.
+
+    Files V1 maps filesystem absence to 404. Older backends returned 500 for
+    the same condition, so an explicit ``item_not_found`` / ``source_not_found``
+    payload counts as absence too — otherwise this client would report a
+    not-yet-created grade directory as a hard failure when talking to a backend
+    that predates the 404 translation.
+    """
+    status = getattr(exc, "status", None) or getattr(exc, "http_code", None)
     try:
-        entries = list_files(
-            org_slug=org_slug,
-            space_slug=space_slug,
-            instance_slug=instance_slug,
-            snapshot_slug="development",
-            area="files",
-            local_path=work_rel or None,
-        )
-    except Exception as exc:
-        clog.debug(f"list_files exit-code probe failed for {work_rel}: {exc}")
-        return None
-    best = None
+        status = int(status)
+    except (TypeError, ValueError):
+        status = None
+    if status in (401, 403):
+        return False
+    if status == 404:
+        return True
+    body = getattr(exc, "body", None)
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except (TypeError, ValueError):
+            return False
+    return isinstance(body, dict) and body.get("code") in {
+        "item_not_found",
+        "source_not_found",
+    }
+
+
+class _ReadinessQueue:
+    """Bounded poller for paths that appear asynchronously during a run.
+
+    Each waiter registers a directory plus a predicate over that directory's
+    listing. The queue polls a given directory at most once per interval,
+    backs off while the answer stays "not yet", and lets every waiter on the
+    same directory share one listing.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._condition = threading.Condition(self._lock)
+        self._next_check: dict[tuple, float] = {}
+        self._interval: dict[tuple, float] = {}
+        self._inflight: set[tuple] = set()
+        self._generation: dict[tuple, int] = {}
+        self._entries: dict[tuple, list | None] = {}
+        self._waiters: dict[tuple, dict[object, int]] = {}
+
+    @staticmethod
+    def _key(org_slug, space_slug, instance_slug, dir_rel):
+        return (org_slug, space_slug, instance_slug, dir_rel)
+
+    def _schedule_next(self, key, *, reset: bool) -> None:
+        with self._lock:
+            if reset:
+                interval = READINESS_POLL_MIN_INTERVAL
+            else:
+                interval = min(
+                    self._interval.get(key, READINESS_POLL_MIN_INTERVAL)
+                    * READINESS_POLL_BACKOFF,
+                    READINESS_POLL_MAX_INTERVAL,
+                )
+            self._interval[key] = interval
+            self._next_check[key] = time.time() + interval
+
+    def forget(self, *, org_slug, space_slug, instance_slug, dir_rel) -> None:
+        """Drop backoff state once a waiter resolves for a directory.
+
+        The last listing stays cached on purpose: co-waiters on the same
+        directory consume it via the generation counter after the resolver
+        returns, so dropping it here would starve them into a re-poll.
+        Entries are bounded by directory count, so this is not a leak.
+        """
+        key = self._key(org_slug, space_slug, instance_slug, dir_rel)
+        with self._lock:
+            self._next_check.pop(key, None)
+            self._interval.pop(key, None)
+
+    def wait_for(
+        self,
+        *,
+        org_slug: str,
+        space_slug: str,
+        instance_slug: str,
+        dir_rel: str,
+        predicate,
+        timeout_secs: int | None,
+        should_abort=None,
+        description: str = "",
+    ):
+        """Poll ``dir_rel`` until ``predicate(entries)`` returns a truthy value.
+
+        Returns the predicate's value, or ``None`` on timeout. ``timeout_secs``
+        of ``None`` waits indefinitely. A missing directory is a quiet
+        "not ready": logged at debug, never raised.
+        """
+        key = self._key(org_slug, space_slug, instance_slug, dir_rel)
+        start = time.time()
+        check_abort = should_abort or _abort_requested
+        label = description or dir_rel or "/"
+        waiter = object()
+        with self._condition:
+            generation = self._generation.get(key, 0)
+            self._waiters.setdefault(key, {})[waiter] = generation
+
+        try:
+            while timeout_secs is None or time.time() - start < timeout_secs:
+                if check_abort():
+                    raise KeyboardInterrupt(
+                        f"grade aborted while waiting for {label} on [{instance_slug}]"
+                    )
+
+                entries = None
+                evaluate = False
+                poll = False
+                with self._condition:
+                    generation = self._generation.get(key, 0)
+                    waiters = self._waiters[key]
+                    if generation > waiters[waiter] and key in self._entries:
+                        entries = self._entries[key]
+                        waiters[waiter] = generation
+                        evaluate = entries is not None
+                    elif key in self._inflight or any(
+                        seen < generation for seen in waiters.values()
+                    ):
+                        self._condition.wait(timeout=1.0)
+                    else:
+                        delay = max(
+                            0.0, self._next_check.get(key, 0.0) - time.time()
+                        )
+                        if delay > 0:
+                            self._condition.wait(timeout=min(delay, 1.0))
+                        else:
+                            self._inflight.add(key)
+                            poll = True
+
+                if evaluate:
+                    result = predicate(entries)
+                    if result:
+                        self.forget(
+                            org_slug=org_slug,
+                            space_slug=space_slug,
+                            instance_slug=instance_slug,
+                            dir_rel=dir_rel,
+                        )
+                        return result
+                if poll:
+                    entries = None
+                    try:
+                        entries = list_files(
+                            org_slug=org_slug,
+                            space_slug=space_slug,
+                            instance_slug=instance_slug,
+                            snapshot_slug="development",
+                            area="files",
+                            local_path=dir_rel or None,
+                        )
+                    except Exception as exc:
+                        if _is_not_found_error(exc):
+                            clog.debug(
+                                f"[{instance_slug}] {label} does not exist yet; re-checking."
+                            )
+                        else:
+                            clog.debug(f"list_files poll failed for {label}: {exc}")
+                    except BaseException:
+                        with self._condition:
+                            self._inflight.discard(key)
+                            self._condition.notify_all()
+                        raise
+                    with self._condition:
+                        self._entries[key] = entries
+                        self._generation[key] = self._generation.get(key, 0) + 1
+                        self._inflight.discard(key)
+                        # Directory exists but the awaited item is not in it:
+                        # keep the fast cadence. If it is absent, back off.
+                        self._schedule_next(key, reset=entries is not None)
+                        self._condition.notify_all()
+            return None
+        finally:
+            with self._condition:
+                waiters = self._waiters.get(key)
+                if waiters is not None:
+                    waiters.pop(waiter, None)
+                    if not waiters:
+                        self._waiters.pop(key, None)
+                self._condition.notify_all()
+
+
+_READINESS_QUEUE = _ReadinessQueue()
+
+
+def _entry_names(entries) -> list[str]:
+    names = []
     for entry in entries or []:
         d = _model_to_dict(entry) if not isinstance(entry, dict) else entry
-        short = str(d.get("short_id") or d.get("name") or d.get("slug") or "")
+        short = d.get("short_id") or d.get("name") or d.get("slug") or ""
+        if short:
+            names.append(str(short))
+    return names
+
+
+def _exit_code_from_entries(entries) -> int | None:
+    """Extract `.cmd_exit.<code>` from an already-fetched listing."""
+    best = None
+    for short in _entry_names(entries):
         if not short.startswith(".cmd_exit."):
             continue
-        suffix = short[len(".cmd_exit.") :]
         try:
-            best = int(suffix)
+            best = int(short[len(".cmd_exit.") :])
         except ValueError:
             continue
     return best
@@ -1584,6 +1789,11 @@ def _wait_for_execute_completion(
 ) -> int:
     """Block until the done-file exists; return the validation exit code.
 
+    The work directory is created by the validation command itself, so it is
+    legitimately absent for the first polls; the readiness queue treats that as
+    "not ready" and backs off instead of failing. ``.cmd_done`` and the
+    ``.cmd_exit.<code>`` sentinel are read from the same listing.
+
     ``timeout_secs=0`` disables the timeout and waits indefinitely.
     ``timeout_secs=None`` (default) falls back to the GRADE_EXEC_TIMEOUT_SECS
     env var, then 600.
@@ -1597,33 +1807,39 @@ def _wait_for_execute_completion(
     work_rel = str(Path(rel).parent).replace("\\", "/")
     if work_rel in (".", ""):
         work_rel = ""
+    done_name = Path(rel).name
     clog.info(
         f"[{instance_slug}] waiting for command completion via {done_file} "
         + ("(no timeout)." if no_timeout else f"(timeout={timeout_secs}s).")
     )
-    ok = _wait_for_files_area_path(
+
+    def _completed(entries):
+        names = _entry_names(entries)
+        if done_name not in names:
+            return None
+        # Done file is present: this listing also carries the exit sentinel,
+        # so no second call is needed. Wrap in a tuple so exit_code 0 stays
+        # truthy for the queue's "is it ready" check.
+        return (_exit_code_from_entries(entries),)
+
+    result = _READINESS_QUEUE.wait_for(
         org_slug=org_slug,
         space_slug=space_slug,
         instance_slug=instance_slug,
-        rel_path=rel,
+        dir_rel=work_rel,
+        predicate=_completed,
         timeout_secs=None if no_timeout else timeout_secs,
-        stable_rounds=1,
-        require_nonzero_size=True,
         should_abort=should_abort,
+        description=done_file,
     )
-    if not ok:
+    if result is None:
         raise ClickException(
             f"Timed out after {timeout_secs}s waiting for command completion "
             f"on [{instance_slug}] ({done_file}). "
             f"Will attempt to pull any output/error logs already written "
             f"before stopping the app."
         )
-    exit_code = _parse_exit_code_from_listing(
-        org_slug=org_slug,
-        space_slug=space_slug,
-        instance_slug=instance_slug,
-        work_rel=work_rel,
-    )
+    exit_code = result[0]
     if exit_code is None:
         # Done file present but sentinel missing — treat as failure to avoid
         # false "ok" when the writer partially ran.
@@ -1661,7 +1877,16 @@ def _files_area_entry_exists(
             local_path=parent or None,
         )
     except Exception as exc:
-        clog.debug(f"list_files existence check failed for {rel_path}: {exc}")
+        # Absence is the expected negative answer here (the staged file may
+        # simply not be there); anything else is a real error worth surfacing
+        # at a higher log level, since it changes what the caller should do.
+        if _is_not_found_error(exc):
+            clog.debug(f"{rel_path} does not exist on [{instance_slug}].")
+        else:
+            clog.warning(
+                f"list_files existence check failed for {rel_path} "
+                f"on [{instance_slug}]: {exc}"
+            )
         return False
     for entry in entries or []:
         d = _model_to_dict(entry) if not isinstance(entry, dict) else entry

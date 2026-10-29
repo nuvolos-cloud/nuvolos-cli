@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
@@ -331,13 +332,13 @@ def test_wait_for_execute_completion_zero_disables_timeout(monkeypatch):
 
     def fake_list_files(**kwargs):
         calls["n"] += 1
-        # First call: not there yet. Second+: file present with stable size.
+        # First call: not there yet. Second+: done file plus the exit sentinel,
+        # which must be read from this same listing (no second request).
         if calls["n"] < 2:
             return []
-        return [{"name": ".cmd_done", "size": 1}]
+        return [{"name": ".cmd_done", "size": 1}, {"name": ".cmd_exit.0"}]
 
     monkeypatch.setattr(grade_mod, "list_files", fake_list_files)
-    monkeypatch.setattr(grade_mod, "_parse_exit_code_from_listing", lambda **kw: 0)
     monkeypatch.setattr(grade_mod.time, "sleep", lambda _seconds: None)
 
     exit_code = grade_mod._wait_for_execute_completion(
@@ -348,7 +349,7 @@ def test_wait_for_execute_completion_zero_disables_timeout(monkeypatch):
         timeout_secs=0,
     )
     assert exit_code == 0
-    assert calls["n"] >= 2
+    assert calls["n"] == 2
 
 
 def test_wait_for_execute_completion_finite_timeout_raises(monkeypatch):
@@ -357,10 +358,16 @@ def test_wait_for_execute_completion_finite_timeout_raises(monkeypatch):
 
     monkeypatch.setattr(grade_mod, "list_files", lambda **kwargs: [])
     monkeypatch.setattr(grade_mod.time, "sleep", lambda _seconds: None)
-    # Force the deadline to already be in the past so the loop exits on the
-    # first iteration instead of actually waiting real time in the test.
-    times = iter([1000.0, 1000.0, 2000.0])
-    monkeypatch.setattr(grade_mod.time, "time", lambda: next(times))
+    # Virtual clock: every read advances time, so the 5s deadline is reached
+    # after a few polls instead of waiting real time. Avoids pinning the test
+    # to an exact number of time.time() reads.
+    clock = {"t": 1000.0}
+
+    def _tick():
+        clock["t"] += 1.0
+        return clock["t"]
+
+    monkeypatch.setattr(grade_mod.time, "time", _tick)
 
     with pytest.raises(ClickException, match="Timed out after 5s"):
         grade_mod._wait_for_execute_completion(
@@ -370,6 +377,212 @@ def test_wait_for_execute_completion_finite_timeout_raises(monkeypatch):
             done_file="/files/.nuvolos_grade/run/stu_1/.cmd_done",
             timeout_secs=5,
         )
+
+
+def test_wait_for_execute_completion_tolerates_absent_work_dir(monkeypatch):
+    """Production incident (2026-10-27, UZH Advanced Topics).
+
+    The per-student work dir is created by `mkdir -p` inside the validation
+    command itself, so the first listings target a path that cannot exist yet.
+    Files V1 reports that as 404. The waiter must treat it as "not ready" and
+    keep polling, not surface it as a failure.
+    """
+    from nuvolos_cli import grade as grade_mod
+
+    class _NotFound(Exception):
+        status = 404
+        body = '{"code": "item_not_found"}'
+
+    calls = {"n": 0}
+
+    def fake_list_files(**kwargs):
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise _NotFound("File or folder does not exist")
+        return [{"name": ".cmd_done", "size": 1}, {"name": ".cmd_exit.0"}]
+
+    monkeypatch.setattr(grade_mod, "list_files", fake_list_files)
+    monkeypatch.setattr(grade_mod.time, "sleep", lambda _seconds: None)
+
+    exit_code = grade_mod._wait_for_execute_completion(
+        org_slug="org1",
+        space_slug="space1",
+        instance_slug="stu_1",
+        done_file="/files/.nuvolos_grade/run/stu_1/.cmd_done",
+        timeout_secs=0,
+    )
+    assert exit_code == 0
+    assert calls["n"] == 4
+
+
+def test_wait_for_execute_completion_reports_nonzero_exit(monkeypatch):
+    """A failing validation command must surface its real exit code."""
+    from nuvolos_cli import grade as grade_mod
+
+    monkeypatch.setattr(
+        grade_mod,
+        "list_files",
+        lambda **kwargs: [
+            {"name": ".cmd_done", "size": 1},
+            {"name": ".cmd_exit.2"},
+        ],
+    )
+    monkeypatch.setattr(grade_mod.time, "sleep", lambda _seconds: None)
+
+    assert (
+        grade_mod._wait_for_execute_completion(
+            org_slug="org1",
+            space_slug="space1",
+            instance_slug="stu_1",
+            done_file="/files/.nuvolos_grade/run/stu_1/.cmd_done",
+            timeout_secs=0,
+        )
+        == 2
+    )
+
+
+def test_wait_for_execute_completion_missing_sentinel_is_failure(monkeypatch):
+    """Done file without `.cmd_exit.<code>` must not be reported as success."""
+    from nuvolos_cli import grade as grade_mod
+
+    monkeypatch.setattr(
+        grade_mod,
+        "list_files",
+        lambda **kwargs: [{"name": ".cmd_done", "size": 1}],
+    )
+    monkeypatch.setattr(grade_mod.time, "sleep", lambda _seconds: None)
+
+    assert (
+        grade_mod._wait_for_execute_completion(
+            org_slug="org1",
+            space_slug="space1",
+            instance_slug="stu_1",
+            done_file="/files/.nuvolos_grade/run/stu_1/.cmd_done",
+            timeout_secs=0,
+        )
+        == 1
+    )
+
+
+def test_wrap_command_publishes_exit_sentinel_before_done_file():
+    from nuvolos_cli.grade import _wrap_command_with_done_file
+
+    command = _wrap_command_with_done_file(
+        "true",
+        done_file="/files/results/.cmd_done",
+        output_log="/files/results/output.log",
+    )
+    assert command.index(': > "$work/.cmd_exit.$ec"') < command.index(
+        'printf \'%s\' "$ec" > "$done_file"'
+    )
+
+
+def test_readiness_queue_backs_off_while_absent(monkeypatch):
+    """Absent directories must widen the poll interval, present ones reset it."""
+    from nuvolos_cli import grade as grade_mod
+
+    queue = grade_mod._ReadinessQueue()
+    key = queue._key("org1", "space1", "stu_1", "dir")
+    now = [1000.0]
+    monkeypatch.setattr(grade_mod.time, "time", lambda: now[0])
+
+    queue._schedule_next(key, reset=False)
+    first = queue._interval[key]
+    queue._schedule_next(key, reset=False)
+    second = queue._interval[key]
+    assert second > first
+    assert second <= grade_mod.READINESS_POLL_MAX_INTERVAL
+
+    # Once the directory exists, polling returns to the fast cadence.
+    queue._schedule_next(key, reset=True)
+    assert queue._interval[key] == grade_mod.READINESS_POLL_MIN_INTERVAL
+
+
+def test_is_not_found_error_detects_absence_shapes():
+    """404 and legacy `item_not_found` payloads both mean "not there yet"."""
+    from nuvolos_cli import grade as grade_mod
+
+    class _Status(Exception):
+        status = 404
+        body = ""
+
+    class _LegacyFiveHundred(Exception):
+        status = 500
+        body = '{"code": "item_not_found", "debug": "does not exist"}'
+
+    class _RealFailure(Exception):
+        status = 500
+        body = '{"code": "space_rested"}'
+
+    class _UrlOnlyMatch(Exception):
+        status = 500
+        body = ""
+
+        def __str__(self):
+            return "request failed: /files/item_not_found"
+
+    class _AuthError(Exception):
+        status = 403
+        body = '{"code": "item_not_found"}'
+
+    assert grade_mod._is_not_found_error(_Status("missing"))
+    assert grade_mod._is_not_found_error(_LegacyFiveHundred("boom"))
+    assert not grade_mod._is_not_found_error(_RealFailure("boom"))
+    assert not grade_mod._is_not_found_error(_UrlOnlyMatch("boom"))
+    assert not grade_mod._is_not_found_error(_AuthError("forbidden"))
+
+
+def test_readiness_queue_shares_listing_with_waiters(monkeypatch):
+    from nuvolos_cli import grade as grade_mod
+
+    queue = grade_mod._ReadinessQueue()
+    request_started = threading.Event()
+    release_request = threading.Event()
+    calls = []
+
+    def fake_list_files(**kwargs):
+        calls.append(kwargs)
+        request_started.set()
+        assert release_request.wait(timeout=2)
+        return [{"name": "ready-a"}, {"name": "ready-b"}]
+
+    monkeypatch.setattr(grade_mod, "list_files", fake_list_files)
+    results = {}
+
+    def wait_for(name):
+        results[name] = queue.wait_for(
+            org_slug="org1",
+            space_slug="space1",
+            instance_slug="stu_1",
+            dir_rel="work",
+            predicate=lambda entries: any(entry["name"] == name for entry in entries),
+            timeout_secs=2,
+            description=name,
+        )
+
+    first = threading.Thread(target=wait_for, args=("ready-a",))
+    second = threading.Thread(target=wait_for, args=("ready-b",))
+    first.start()
+    assert request_started.wait(timeout=2)
+    second.start()
+
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        with queue._condition:
+            if len(queue._waiters.get(("org1", "space1", "stu_1", "work"), {})) == 2:
+                break
+        threading.Event().wait(0.01)
+    else:
+        pytest.fail("second waiter did not register")
+
+    release_request.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert results == {"ready-a": True, "ready-b": True}
+    assert len(calls) == 1
 
 
 def test_started_app_registry_stop_all(monkeypatch):
@@ -1030,14 +1243,14 @@ def test_late_worker_does_not_start_after_globals_cleared(monkeypatch, tmp_path)
     monkeypatch.setattr(grade_mod, "GRADE_QUEUE_ROOT", str(tmp_path))
     starts = []
 
-    def fake_workloads(**kwargs):
+    def fake_get_active_registry():
         registry.request_abort()
         grade_mod._set_active_registry(None)
         grade_mod._run_abort_event.clear()
-        return []
+        return registry
 
     monkeypatch.setattr(grade_mod, "list_apps", lambda **kw: [{"slug": "bot"}])
-    monkeypatch.setattr(grade_mod, "list_all_running_workloads_for_app", fake_workloads)
+    monkeypatch.setattr(grade_mod, "_get_active_registry", fake_get_active_registry)
     monkeypatch.setattr(grade_mod, "start_app", lambda **kw: starts.append(kw["instance_slug"]))
     monkeypatch.setattr(grade_mod, "stop_app", lambda **kw: None)
 

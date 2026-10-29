@@ -231,6 +231,16 @@ prints the counts plus `results_file` and `results_run_dir`.
     grading; grade wraps the body and waits on `.cmd_done` before pulling logs
     or stopping the app. See also [Execute commands](execute_commands.md).
 
+!!! note "Waiting for results"
+
+    The per-student work directory is created by the validation command itself
+    (`mkdir -p`), so it does not exist when grade starts watching for it. All
+    readiness checks run through a shared queue that treats a missing directory
+    as "not ready yet" — the backend answers `404` for it — and widens the poll
+    interval while it stays absent, instead of each student spinning at a fixed
+    rate. `.cmd_done` and `.cmd_exit.<code>` are read from the same directory
+    listing, so completion costs one request per check rather than two.
+
 ## Staging a first run
 
 Recommended order on a new assignment:
@@ -252,6 +262,7 @@ Recommended order on a new assignment:
 | Validation command exited with code ≠ 0 | Student script failed; inspect `output.log` / `error.log` under results |
 | Log pull failed / files missing on master | Distribute/FS settle issue; check `/files/grade_results/<run_id>/...` on master after refresh |
 | Parallelism ignored | Without `--continue-on-error`, workers are forced to 1 so the run can stop after the first failure |
+| Student failed: "timed out … waiting for command completion" | The validation command never wrote `.cmd_done`; check `output.log` under the results dir, or raise `--exec-timeout` (`0` waits indefinitely) |
 
 ## Related guides
 
