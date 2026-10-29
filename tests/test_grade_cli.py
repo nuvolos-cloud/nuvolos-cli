@@ -1056,6 +1056,9 @@ def test_run_grade_check_aborts_stops_started_apps(monkeypatch, tmp_path):
     monkeypatch.setattr(grade_mod, "wait_for_app_running", fake_wait)
     monkeypatch.setattr(grade_mod, "list_apps", lambda **kw: [{"slug": "bot"}])
     monkeypatch.setattr(
+        grade_mod, "list_all_running_workloads_for_app", lambda **kw: []
+    )
+    monkeypatch.setattr(
         grade_mod,
         "list_instances",
         lambda **kw: [
@@ -1175,6 +1178,9 @@ def test_parallel_abort_stops_started_app_and_skips_late_start(monkeypatch, tmp_
     monkeypatch.setattr(grade_mod, "stop_app", lambda **kw: stops.append(kw["instance_slug"]))
     monkeypatch.setattr(grade_mod, "wait_for_app_running", fake_wait)
     monkeypatch.setattr(grade_mod, "list_apps", lambda **kwargs: [{"slug": "bot"}])
+    monkeypatch.setattr(
+        grade_mod, "list_all_running_workloads_for_app", lambda **kwargs: []
+    )
     monkeypatch.setattr(
         grade_mod,
         "list_instances",
@@ -1380,6 +1386,7 @@ def test_grade_check_failed_student_exits_nonzero(runner, teaching_env, tmp_path
         patch("nuvolos_cli.grade.list_space_members", return_value=[]),
         patch("nuvolos_cli.grade._as_files_abs_path", side_effect=fake_files_path),
         patch("nuvolos_cli.grade.list_apps", return_value=[]),
+        patch("nuvolos_cli.grade.list_all_running_workloads_for_app", return_value=[]),
         patch("nuvolos_cli.grade.start_app") as start,
         patch("nuvolos_cli.grade.handback_collected_results", return_value={"status": "ok"}),
     ):

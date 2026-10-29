@@ -26,6 +26,7 @@ from tabulate import tabulate
 from .api_client import (
     distribute_content,
     execute_command_in_app,
+    list_all_running_workloads_for_app,
     list_apps,
     list_files,
     list_instances,
@@ -1493,6 +1494,9 @@ def _wait_for_files_area_path(
         parent = ""
     # Size stability is tracked across polls; `stable_rounds` consecutive
     # identical non-zero sizes mean the writer is done extending the file.
+    # When this directory is shared with other waiters, "consecutive" means
+    # consecutive shared polls, which may skip this waiter's own cadence —
+    # benign, since stability compares values, not timing.
     state = {"last_size": None, "stable": 0}
 
     def _settled(entries):
@@ -1612,10 +1616,6 @@ class _ReadinessQueue:
     def _key(org_slug, space_slug, instance_slug, dir_rel):
         return (org_slug, space_slug, instance_slug, dir_rel)
 
-    def _due_in(self, key) -> float:
-        with self._lock:
-            return max(0.0, self._next_check.get(key, 0.0) - time.time())
-
     def _schedule_next(self, key, *, reset: bool) -> None:
         with self._lock:
             if reset:
@@ -1630,7 +1630,13 @@ class _ReadinessQueue:
             self._next_check[key] = time.time() + interval
 
     def forget(self, *, org_slug, space_slug, instance_slug, dir_rel) -> None:
-        """Drop backoff state once a directory is known to exist."""
+        """Drop backoff state once a waiter resolves for a directory.
+
+        The last listing stays cached on purpose: co-waiters on the same
+        directory consume it via the generation counter after the resolver
+        returns, so dropping it here would starve them into a re-poll.
+        Entries are bounded by directory count, so this is not a leak.
+        """
         key = self._key(org_slug, space_slug, instance_slug, dir_rel)
         with self._lock:
             self._next_check.pop(key, None)
@@ -1676,7 +1682,7 @@ class _ReadinessQueue:
                 with self._condition:
                     generation = self._generation.get(key, 0)
                     waiters = self._waiters[key]
-                    if generation > waiters[waiter]:
+                    if generation > waiters[waiter] and key in self._entries:
                         entries = self._entries[key]
                         waiters[waiter] = generation
                         evaluate = entries is not None
